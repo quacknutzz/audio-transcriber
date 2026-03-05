@@ -1,0 +1,19 @@
+{
+    "name": "audio-transcriber-desktop",
+    "version": "1.0.0",
+    "description": "Desktop wrapper for Audio Transcriber using Electron",
+    "main": "main.js",
+    "scripts": {
+        "start": "node start_desktop.js"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "devDependencies": {
+        "electron": "^40.6.0"
+    },
+    "dependencies": {
+        "tree-kill": "^1.2.2",
+        "wait-on": "^8.0.5"
+    }
+}

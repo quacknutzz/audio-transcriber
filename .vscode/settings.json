@@ -1,0 +1,10 @@
+{
+    "python.defaultInterpreterPath": "c:\\Users\\rishi\\.gemini\\antigravity\\scratch\\audio_transcriber\\backend\\venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "c:\\Users\\rishi\\.gemini\\antigravity\\scratch\\audio_transcriber\\backend\\venv\\Lib\\site-packages"
+    ],
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true
+    }
+}
