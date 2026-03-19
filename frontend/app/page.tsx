@@ -36,6 +36,24 @@ const STAGES = [
 ];
 
 export default function Home() {
+  /* ── Safe download (prevents Electron navigation) ─── */
+  const downloadFile = async (url: string, filename: string) => {
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error('Download failed:', err);
+    }
+  };
+
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
@@ -87,8 +105,9 @@ export default function Home() {
       const data = await response.json();
       setMessage('Processing started...');
       pollStatus(data.filename);
-    } catch {
-      setMessage('Upload failed. Please try again.');
+    } catch (err: any) {
+      console.error('Upload catch block triggered:', err);
+      setMessage(`Upload failed: ${err.message || String(err)}. Please try again.`);
       setUploading(false);
     }
   };
@@ -112,6 +131,7 @@ export default function Home() {
           return;
         } else if (data.status === 'error') {
           setUploading(false);
+          setMessage(`Transcription failed: ${data.message || 'Unknown error'}`);
           return;
         }
       }
@@ -119,6 +139,18 @@ export default function Home() {
       console.error('Polling error', err);
     }
     setTimeout(() => pollStatus(filename), 2500);
+  };
+
+  /* ── Reset to home ─────────────────────────────────────── */
+  const resetApp = () => {
+    setFile(null);
+    setUploading(false);
+    setMessage('');
+    setProgress(0);
+    setAvailableStems({});
+    setAvailableStemsAudio({});
+    setActiveStem(null);
+    setMusicXml(null);
   };
 
   /* ── Load sheet music ──────────────────────────────────── */
@@ -172,8 +204,21 @@ export default function Home() {
             AI-Powered Multi-Instrument Transcription
           </div>
           <h1 className="text-5xl lg:text-7xl tracking-tight font-black text-transparent bg-clip-text bg-gradient-to-br from-white via-slate-200 to-slate-400">
-            SonicScribe<span className="bg-gradient-to-r from-indigo-400 via-fuchsia-400 to-rose-400 bg-clip-text"> AI</span>
+            Ghost<span className="bg-gradient-to-r from-indigo-400 via-fuchsia-400 to-rose-400 bg-clip-text">Note</span>
           </h1>
+
+          {/* Back / New Upload button - visible when results are loaded */}
+          {isComplete && (
+            <button
+              onClick={resetApp}
+              className="mt-4 inline-flex items-center gap-2 px-5 py-2 rounded-full border border-slate-700/50 bg-slate-800/40 hover:bg-slate-700/40 backdrop-blur-sm text-xs font-semibold text-slate-300 hover:text-white transition-all active:scale-95"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+              </svg>
+              New Upload
+            </button>
+          )}
           <p className="text-base lg:text-lg text-slate-500 max-w-xl mx-auto leading-relaxed">
             Drop any song. Our neural engine separates every instrument and generates studio-quality sheet music.
           </p>
@@ -230,6 +275,19 @@ export default function Home() {
               )}
             </div>
           </div>
+
+          {/* ── Error Alert ────────────────────────────────── */}
+          {file && !uploading && !isComplete && message.includes('failed') && (
+            <div className="mt-6 w-full animate-fadeIn rounded-xl bg-rose-500/10 border border-rose-500/20 p-4 text-center">
+              <div className="flex items-center justify-center gap-2 text-rose-400 mb-1">
+                <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <span className="font-semibold text-sm">Error Occurred</span>
+              </div>
+              <p className="text-xs text-rose-300/80">{message.replace(/Transcription failed: |Upload failed: /g, '')}</p>
+            </div>
+          )}
 
           {/* ── Transcribe button ──────────────────────────── */}
           {file && !uploading && !isComplete && (
@@ -364,19 +422,20 @@ export default function Home() {
                         />
                       )}
 
-                      {/* Download link */}
+                      {/* Download button (safe for Electron) */}
                       <div className="mt-2 flex justify-end">
-                        <a
-                          href={`http://127.0.0.1:8000${xmlUrl}`}
-                          download={`${instrument}_score.musicxml`}
-                          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors flex items-center gap-1"
-                          onClick={(e) => e.stopPropagation()}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadFile(`http://127.0.0.1:8000${xmlUrl}`, `${instrument}_score.musicxml`);
+                          }}
+                          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer"
                         >
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                           </svg>
                           MusicXML
-                        </a>
+                        </button>
                       </div>
                     </div>
                   </div>

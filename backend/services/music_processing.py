@@ -107,20 +107,22 @@ class MusicProcessingService:
                 quantized_dur = round(raw_dur / grid) * grid
                 if quantized_dur < grid: quantized_dur = grid # Min duration
                 
-                # Clone and adjust
-                if isinstance(el, music21.chord.Chord):
-                    new_el = music21.chord.Chord(el.pitches)
-                else:
-                    new_el = music21.note.Note(el.pitch)
+                # Clone and adjust using deepcopy to safely preserve Unpitched and PercussionChord elements
+                import copy
+                new_el = copy.deepcopy(el)
                 
-                new_el.volume = el.volume
+                if hasattr(new_el, 'volume') and hasattr(el, 'volume') and el.volume is not None:
+                    new_el.volume = el.volume
                 new_el.quarterLength = quantized_dur
                 
                 # Insert at new offset
                 new_part.insert(quantized_offset, new_el)
 
             # 3. Clean up notation (ties, beams)
-            new_part.makeNotation(inPlace=True)
+            try:
+                new_part.makeNotation(inPlace=True)
+            except Exception as notation_e:
+                self.logger.warning(f"makeNotation skipped (expected for percussion/Unpitched): {notation_e}")
             
             # 4. Force Voice 1 (to satisfy strict parsers)
             for n in new_part.recurse().notesAndRests:
@@ -132,5 +134,6 @@ class MusicProcessingService:
             return output_xml_path
 
         except Exception as e:
-            self.logger.error(f"MusicXML conversion failed: {e}")
+            import traceback
+            self.logger.error(f"MusicXML conversion failed: {e}\n{traceback.format_exc()}")
             raise e

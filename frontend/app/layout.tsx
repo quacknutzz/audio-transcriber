@@ -9,8 +9,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "SonicScribe AI — Audio to Sheet Music",
-  description: "AI-powered multi-instrument audio transcription. Upload any song and get studio-quality sheet music in minutes.",
+  title: "GhostNote",
+  description: "Multi-instrument audio transcription.",
 };
 
 export default function RootLayout({
