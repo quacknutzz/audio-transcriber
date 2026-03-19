@@ -88,14 +88,34 @@ app.whenReady().then(() => {
     });
 });
 
-// Clean up processes when app closes
-app.on('before-quit', () => {
+// Kill all child processes aggressively
+function cleanupProcesses() {
     console.log('Shutting down services...');
-    if (backendProcess && backendProcess.pid) treeKill(backendProcess.pid);
-    if (frontendProcess && frontendProcess.pid) treeKill(frontendProcess.pid);
-});
+    if (backendProcess && backendProcess.pid) {
+        try { treeKill(backendProcess.pid, 'SIGKILL'); } catch (e) { /* ignore */ }
+    }
+    if (frontendProcess && frontendProcess.pid) {
+        try { treeKill(frontendProcess.pid, 'SIGKILL'); } catch (e) { /* ignore */ }
+    }
+    // Safety net: force-kill anything still on our ports
+    const { execSync } = require('child_process');
+    try {
+        execSync('for /f "tokens=5" %a in (\'netstat -aon ^| findstr ":3000" ^| findstr "LISTENING"\') do taskkill /F /PID %a', { shell: true, stdio: 'ignore' });
+    } catch (e) { /* nothing on port */ }
+    try {
+        execSync('for /f "tokens=5" %a in (\'netstat -aon ^| findstr ":8000" ^| findstr "LISTENING"\') do taskkill /F /PID %a', { shell: true, stdio: 'ignore' });
+    } catch (e) { /* nothing on port */ }
+}
+
+// Clean up on every possible exit signal
+app.on('before-quit', cleanupProcesses);
+app.on('will-quit', cleanupProcesses);
+process.on('SIGINT', () => { cleanupProcesses(); process.exit(); });
+process.on('SIGTERM', () => { cleanupProcesses(); process.exit(); });
+process.on('uncaughtException', (err) => { console.error('Uncaught:', err); cleanupProcesses(); process.exit(1); });
 
 app.on('window-all-closed', () => {
+    cleanupProcesses();
     if (process.platform !== 'darwin') {
         app.quit();
     }
