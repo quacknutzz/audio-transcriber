@@ -50,32 +50,31 @@ def load_existing_jobs():
     if not (OUTPUT_DIR / "xml").exists():
         return
         
-    # Group found XML files by their original filename root (e.g., test_audio_piano.xml -> test_audio)
+    # Group found XML files by their original filename root (e.g., test_audio_piano.musicxml -> test_audio)
     recovered_jobs = {}
-    for xml_file in (OUTPUT_DIR / "xml").glob("*.xml"):
-        # Files are named like: projectname_instrument.xml
+    for xml_file in (OUTPUT_DIR / "xml").glob("*.musicxml"):
+        # Files are named like: projectname_instrument.musicxml
         # We need to extract 'projectname'
         parts = xml_file.stem.rsplit("_", 1)
         if len(parts) == 2:
             project_name, instrument = parts
             
-            # Assume original extension was .wav or .mp3. We'll track it abstractly.
-            # Next.js will ask for `test_audio.wav`, so we'll map both extensions just in case
             for ext in [".wav", ".mp3", ".m4a"]:
                 virtual_filename = project_name + ext
                 if virtual_filename not in recovered_jobs:
                     recovered_jobs[virtual_filename] = {}
                 recovered_jobs[virtual_filename][instrument] = f"/xml/{xml_file.name}"
-                
-        for instrument in results.keys():
-            # Expected path: project_name/htdemucs_6s/project_name/instrument.wav
-            expected_stem = OUTPUT_DIR / "stems" / project_name / "htdemucs_6s" / project_name / f"{instrument}.wav"
-            if expected_stem.exists():
-                rel_path = expected_stem.relative_to(OUTPUT_DIR / "stems")
-                stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
           
-    for filename, results in recovered_jobs.items():
-        job_status[filename] = {
+    for virt_filename, results in recovered_jobs.items():
+        # Try to recover stem audio URLs too
+        stems_urls = {}
+        for instrument in results.keys():
+            parts = list((OUTPUT_DIR / "stems").glob(f"**/htdemucs_6s/**/{instrument}.wav"))
+            if parts:
+                rel_path = parts[0].relative_to(OUTPUT_DIR / "stems")
+                stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
+                
+        job_status[virt_filename] = {
             "status": "completed", 
             "progress": 100, 
             "message": "Loaded from history.",
@@ -135,20 +134,25 @@ async def process_audio_task(file_path: Path, filename: str):
         # Transcribe Drums (Percussion)
         if "drums" in stems:
             midi_path = await transcription_service.transcribe_melody(stems["drums"], f"{project_name}_drums", instrument_name="drums")
-            results["drums"] = xml_path
+            drum_xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_drums", audio_ref_path=file_path)
+            results["drums"] = drum_xml_path
             
         # Formulate web-accessible URLs
         results_urls = {}
         stems_urls = {}
         for instrument, local_path in results.items():
             # Convert system path to web XML URL
-            filename = Path(local_path).name
-            results_urls[instrument] = f"/xml/{filename}"
+            xml_basename = Path(local_path).name
+            results_urls[instrument] = f"/xml/{xml_basename}"
             
             # Formulate the expected stem URL if it exists
             if instrument in stems:
-                rel_path = Path(stems[instrument]).relative_to(OUTPUT_DIR / "stems")
-                stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
+                try:
+                    rel_path = Path(stems[instrument]).relative_to(OUTPUT_DIR / "stems")
+                    stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
+                except ValueError:
+                    # Path is not relative to stems dir, skip
+                    pass
             
         print(f"Processing complete for {filename}. Results: {results_urls}")
         job_status[filename] = {
@@ -189,4 +193,4 @@ async def get_status(filename: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
