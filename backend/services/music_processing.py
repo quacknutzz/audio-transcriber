@@ -93,11 +93,11 @@ class MusicProcessingService:
                 new_part.insert(0, music21.instrument.Piano()) # Default
 
             # 2. Smart Quantization
-            # Instead of destructive resampling, we iterate notes and snap start/duration.
             # Grid = 16th note (0.25)
             grid = 0.25
             
-            for el in original_part.recurse().notes:
+            # CRITICAL FIX: Use flatten().notes to get absolute song offsets instead of measure-relative!
+            for el in original_part.flatten().notes:
                 # Snap offset (start time)
                 raw_offset = el.offset
                 quantized_offset = round(raw_offset / grid) * grid
@@ -115,16 +115,22 @@ class MusicProcessingService:
                     new_el.volume = el.volume
                 new_el.quarterLength = quantized_dur
                 
-                # Insert at new offset
+                # Insert at new absolute offset
                 new_part.insert(quantized_offset, new_el)
 
-            # 3. Clean up notation (ties, beams)
+            # 3. Chordify (ONLY for pitched instruments)
+            # Chordify guarantees clean notation by merging overlapping polyphony into solid blocks.
+            # But it destroys Unpitched drum tracking, so we skip it for drums.
+            if "drums" not in name_lower and "drum" not in name_lower:
+                new_part = new_part.chordify()
+
+            # 4. Clean up notation (ties, beams)
             try:
                 new_part.makeNotation(inPlace=True)
             except Exception as notation_e:
                 self.logger.warning(f"makeNotation skipped (expected for percussion/Unpitched): {notation_e}")
             
-            # 4. Force Voice 1 (to satisfy strict parsers)
+            # 5. Force Voice 1 (to satisfy strict parsers)
             for n in new_part.recurse().notesAndRests:
                 n.voice = 1
             
