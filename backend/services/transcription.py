@@ -14,16 +14,16 @@ class TranscriptionService:
 
     async def transcribe_melody(self, audio_path: Path, output_name: str, instrument_name: str = "other") -> Path:
         """
-        Transcribes audio to MIDI using SOTA MT3 model (Instruments) or TorchCrepe (Vocals).
+        Transcribes audio to MIDI using SOTA MT3 model (Instruments) or Basic Pitch (Vocals).
         """
         self.logger.info(f"Transcribing {instrument_name}: {audio_path}")
         
-        # 1. Vocals: Use TorchCrepe (Monophonic SOTA)
+        # 1. Vocals: Use Basic Pitch (fast, accurate for monophonic melody)
         if instrument_name.lower() == "vocals":
-             return await self._transcribe_monophonic(audio_path, output_name, instrument_name)
+             return await self._transcribe_basic_pitch(audio_path, output_name, instrument_name)
 
         # 2. Instruments: Use Google MT3 (Multi-Task Multitrack)
-        # This covers Piano, Guitar, Bass, Drums, Other
+        # This covers Piano, Guitar, Bass, Other
         return await self._transcribe_mt3(audio_path, output_name, instrument_name)
 
     async def _transcribe_mt3(self, audio_path: Path, output_name: str, instrument_name: str) -> Path:

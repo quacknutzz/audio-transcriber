@@ -83,6 +83,17 @@ def load_existing_jobs():
         }
     print(f"Loaded {len(recovered_jobs)} previous jobs into memory.")
 
+def is_silent(audio_path: Path, threshold: float = 0.01) -> bool:
+    """Check if an audio file is essentially silent by reading peak amplitude."""
+    try:
+        import soundfile as sf
+        import numpy as np
+        data, _ = sf.read(str(audio_path))
+        peak = float(np.max(np.abs(data)))
+        return peak < threshold
+    except Exception:
+        return False  # If we can't read it, assume it has content
+
 async def process_audio_task(file_path: Path, filename: str):
     """
     Background task to handle the heavy lifting of separation and transcription.
@@ -95,47 +106,32 @@ async def process_audio_task(file_path: Path, filename: str):
         print(f"Separation complete. Stems: {stems.keys()}")
         job_status[filename] = {"status": "processing", "progress": 50, "message": "Transcribing instruments..."}
 
-        # 2. Transcription
+        # 2. Transcription (with silence detection and smart routing)
         results = {}
         project_name = file_path.stem
         
-        # Transcribe Bass (Melody)
-        if "bass" in stems:
-            midi_path = await transcription_service.transcribe_melody(stems["bass"], f"{project_name}_bass", instrument_name="bass")
-            xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_bass", audio_ref_path=file_path)
-            results["bass"] = xml_path
+        # Helper to transcribe a stem only if it has audible content
+        async def transcribe_if_audible(stem_key: str, instrument_name: str):
+            if stem_key in stems:
+                stem_path = stems[stem_key]
+                if is_silent(stem_path):
+                    print(f"Skipping {stem_key}: silent stem detected.")
+                    return
+                print(f"Transcribing {stem_key}...")
+                midi_path = await transcription_service.transcribe_melody(stem_path, f"{project_name}_{stem_key}", instrument_name=instrument_name)
+                xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
+                results[stem_key] = xml_path
 
-        # Transcribe Guitar (Melody)
-        if "guitar" in stems:
-            midi_path = await transcription_service.transcribe_melody(stems["guitar"], f"{project_name}_guitar", instrument_name="guitar")
-            xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_guitar", audio_ref_path=file_path)
-            results["guitar"] = xml_path
-        if "other" in stems:
-             midi_path = await transcription_service.transcribe_melody(stems["other"], f"{project_name}_other", instrument_name="other")
-             xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_other", audio_ref_path=file_path)
-             results["other"] = xml_path
+        # Transcribe pitched instruments (MT3 for polyphonic, Basic Pitch for vocals)
+        await transcribe_if_audible("bass", "bass")
+        await transcribe_if_audible("guitar", "guitar")
+        await transcribe_if_audible("other", "other")
+        await transcribe_if_audible("vocals", "vocals")
+        await transcribe_if_audible("piano", "piano")
+        if "keys" in stems and "piano" not in stems:
+            await transcribe_if_audible("keys", "piano")
 
-        # Transcribe Vocals (Melody)
-        if "vocals" in stems:
-            midi_path = await transcription_service.transcribe_melody(stems["vocals"], f"{project_name}_vocals", instrument_name="vocals")
-            xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_vocals", audio_ref_path=file_path)
-            results["vocals"] = xml_path
-            
-        # Transcribe Piano/Keys (Melody/Chords)
-        if "piano" in stems:
-            midi_path = await transcription_service.transcribe_melody(stems["piano"], f"{project_name}_piano", instrument_name="piano")
-            xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_piano", audio_ref_path=file_path)
-            results["piano"] = xml_path
-        elif "keys" in stems: # In case we map it differently later
-             midi_path = await transcription_service.transcribe_melody(stems["keys"], f"{project_name}_keys", instrument_name="piano")
-             xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_keys", audio_ref_path=file_path)
-             results["keys"] = xml_path
-
-        # Transcribe Drums (Percussion)
-        if "drums" in stems:
-            midi_path = await transcription_service.transcribe_melody(stems["drums"], f"{project_name}_drums", instrument_name="drums")
-            drum_xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_drums", audio_ref_path=file_path)
-            results["drums"] = drum_xml_path
+        # Drums: audio stem is served for playback, but NO sheet music is generated
             
         # Formulate web-accessible URLs
         results_urls = {}
@@ -151,8 +147,15 @@ async def process_audio_task(file_path: Path, filename: str):
                     rel_path = Path(stems[instrument]).relative_to(OUTPUT_DIR / "stems")
                     stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
                 except ValueError:
-                    # Path is not relative to stems dir, skip
                     pass
+        
+        # Also serve drum audio for playback (no sheet music)
+        if "drums" in stems and "drums" not in stems_urls:
+            try:
+                rel_path = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
+                stems_urls["drums"] = f"/stems/{rel_path.as_posix()}"
+            except ValueError:
+                pass
             
         print(f"Processing complete for {filename}. Results: {results_urls}")
         job_status[filename] = {
