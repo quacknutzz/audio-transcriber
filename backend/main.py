@@ -186,17 +186,24 @@ async def process_audio_task(file_path: Path, filename: str):
         job_status[filename] = {"status": "error", "progress": 0, "message": str(e)}
 
 @app.post("/upload")
-async def upload_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_audio(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     try:
-        file_path = UPLOAD_DIR / file.filename
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        filename = file.filename
+        file_path = UPLOAD_DIR / filename
+        
+        # Always treat as a new upload and process from scratch
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
         
         # Initialize job status
-        job_status[file.filename] = {"status": "processing", "progress": 0, "message": "Queued for processing..."}
+        job_status[filename] = {"status": "processing", "progress": 0, "message": "Queued for processing..."}
 
         # Offload processing to background task
-        background_tasks.add_task(process_audio_task, file_path, file.filename)
+        background_tasks.add_task(process_audio_task, file_path, filename)
         
         return {"filename": file.filename, "message": "File uploaded successfully. Processing started in background."}
     except Exception as e:
