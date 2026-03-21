@@ -359,12 +359,23 @@ export default function Home() {
         {/* ── Instrument Cards Grid ──────────────────────── */}
         {isComplete && (
           <div className="w-full animate-fadeIn">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/50 to-transparent" />
-              <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">
-                Isolated Tracks
-              </h2>
-              <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/50 to-transparent" />
+            <div className="flex flex-col items-center gap-4 mb-6">
+              <div className="flex items-center gap-3 w-full">
+                <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/50 to-transparent" />
+                <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">
+                  Isolated Tracks
+                </h2>
+                <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/50 to-transparent" />
+              </div>
+
+              {message && message.includes('finished in') && (
+                <div className="text-xs font-mono font-medium text-emerald-400/90 bg-emerald-500/10 px-4 py-1.5 rounded-full border border-emerald-500/20 shadow-[0_0_15px_-3px_rgba(52,211,153,0.15)] flex items-center gap-2">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  {message}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3 w-full">

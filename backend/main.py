@@ -98,6 +98,9 @@ async def process_audio_task(file_path: Path, filename: str):
     """
     Background task to handle the heavy lifting of separation and transcription.
     """
+    import time
+    start_time = time.time()
+    
     try:
         job_status[filename] = {"status": "processing", "progress": 10, "message": "Separating stems..."}
         # 1. Separation
@@ -157,11 +160,15 @@ async def process_audio_task(file_path: Path, filename: str):
             except ValueError:
                 pass
             
+        elapsed = time.time() - start_time
+        m, s = divmod(int(elapsed), 60)
+        time_str = f"{m}m {s}s" if m > 0 else f"{s}s"
+
         print(f"Processing complete for {filename}. Results: {results_urls}")
         job_status[filename] = {
             "status": "completed", 
             "progress": 100, 
-            "message": "Transcription successful.",
+            "message": f"Transcription finished in {time_str}",
             "results": results_urls,
             "stems": stems_urls
         }
