@@ -11,6 +11,7 @@ class TranscriptionService:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
+        self.mt3_model = None
 
     async def transcribe_melody(self, audio_path: Path, output_name: str, instrument_name: str = "other") -> Path:
         """
@@ -34,26 +35,34 @@ class TranscriptionService:
         self.logger.info(f"Using MT3 for {instrument_name}...")
         
         try:
-            import librosa
+            import torchaudio
             from mt3_infer import load_model as mt3_load_model
             
-            # Load Audio (16kHz required for MT3)
-            y, sr = librosa.load(str(audio_path), sr=16000)
+            # Load Audio (Torchaudio uses fast native C++ wrappers)
+            y_tensor, sr = torchaudio.load(str(audio_path))
             
-            # Select Model
-            # "mr_mt3" uses direct HuggingFace download (no Git LFS needed)
-            # 57x realtime speed, 176MB checkpoint
-            model_name = "mr_mt3"
+            # Downsample to exactly 16000Hz dynamically
+            if sr != 16000:
+                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                y_tensor = resampler(y_tensor)
+                
+            # Flatten to 1D mono (MT3 expects a flat 1D numpy array)
+            if y_tensor.shape[0] > 1:
+                y_tensor = y_tensor.mean(dim=0, keepdim=True)
+            y_np = y_tensor.squeeze(0).numpy()
             
-            # Transcribe
-            # auto_download=True will fetch the model on first run
-            self.logger.info("Running MT3 inference (this may take time/download model)...")
-            mt3_model = mt3_load_model(
-                model=model_name,
-                device="auto",
-                auto_download=True
-            )
-            midi_data = mt3_model.transcribe(y, sr=sr)
+            # Cache the model to globally resident RAM/VRAM to prevent 15s+ reload on every stem
+            if self.mt3_model is None:
+                self.logger.info("Initializing MT3 model weights to memory caching (this happens once)...")
+                self.mt3_model = mt3_load_model(
+                    model="mr_mt3",
+                    device="auto",
+                    auto_download=True
+                )
+            
+            # Transcribe from the globally cached model
+            self.logger.info("Running MT3 inference...")
+            midi_data = self.mt3_model.transcribe(y_np, sr=16000)
             
             # Save MIDI
             midi_data.save(str(output_midi_path))
