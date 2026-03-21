@@ -127,7 +127,7 @@ export default function Home() {
           setUploading(false);
           setAvailableStems(data.results || {});
           setAvailableStemsAudio(data.stems || {});
-          setMessage('Transcription Complete!');
+          setMessage(data.message || 'Transcription Complete!');
           return;
         } else if (data.status === 'error') {
           setUploading(false);
@@ -201,7 +201,7 @@ export default function Home() {
         <div className="text-center mb-14 space-y-4">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-slate-700/50 bg-slate-800/40 backdrop-blur-sm text-xs font-medium text-slate-400 mb-4">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            AI-Powered Multi-Instrument Transcription
+            Multi-Instrument Transcription
           </div>
           <h1 className="text-5xl lg:text-7xl tracking-tight font-black text-transparent bg-clip-text bg-gradient-to-br from-white via-slate-200 to-slate-400">
             Ghost<span className="bg-gradient-to-r from-indigo-400 via-fuchsia-400 to-rose-400 bg-clip-text">Note</span>
@@ -219,9 +219,6 @@ export default function Home() {
               New Upload
             </button>
           )}
-          <p className="text-base lg:text-lg text-slate-500 max-w-xl mx-auto leading-relaxed">
-            Drop any song. Our neural engine separates every instrument and generates studio-quality sheet music.
-          </p>
         </div>
 
         {/* ── Upload Zone ────────────────────────────────── */}
@@ -368,7 +365,7 @@ export default function Home() {
                 <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/50 to-transparent" />
               </div>
 
-              {message && message.includes('finished in') && (
+              {message && message.includes('completed in') && (
                 <div className="text-xs font-mono font-medium text-emerald-400/90 bg-emerald-500/10 px-4 py-1.5 rounded-full border border-emerald-500/20 shadow-[0_0_15px_-3px_rgba(52,211,153,0.15)] flex items-center gap-2">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z" />
