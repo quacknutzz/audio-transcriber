@@ -35,21 +35,13 @@ class TranscriptionService:
         self.logger.info(f"Using MT3 for {instrument_name}...")
         
         try:
-            import torchaudio
+            import librosa
             from mt3_infer import load_model as mt3_load_model
             
-            # Load Audio (Torchaudio uses fast native C++ wrappers)
-            y_tensor, sr = torchaudio.load(str(audio_path))
-            
-            # Downsample to exactly 16000Hz dynamically
-            if sr != 16000:
-                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
-                y_tensor = resampler(y_tensor)
-                
-            # Flatten to 1D mono (MT3 expects a flat 1D numpy array)
-            if y_tensor.shape[0] > 1:
-                y_tensor = y_tensor.mean(dim=0, keepdim=True)
-            y_np = y_tensor.squeeze(0).numpy()
+            # Load Audio (16kHz required for MT3)
+            # Reverted to librosa because torchaudio requires native Windows FFmpeg DLLs
+            self.logger.info(f"Loading and downsampling audio via librosa: {audio_path}")
+            y_np, sr = librosa.load(str(audio_path), sr=16000)
             
             # Cache the model to globally resident RAM/VRAM to prevent 15s+ reload on every stem
             if self.mt3_model is None:
