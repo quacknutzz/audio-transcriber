@@ -113,34 +113,26 @@ async def process_audio_task(file_path: Path, filename: str):
         results = {}
         project_name = file_path.stem
         
-        import asyncio
-        semaphore = asyncio.Semaphore(2)
-
         # Helper to transcribe a stem only if it has audible content
         async def transcribe_if_audible(stem_key: str, instrument_name: str):
-            async with semaphore:
-                if stem_key in stems:
-                    stem_path = stems[stem_key]
-                    if is_silent(stem_path):
-                        print(f"Skipping {stem_key}: silent stem detected.")
-                        return
-                    print(f"Transcribing {stem_key}...")
-                    midi_path = await transcription_service.transcribe_melody(stem_path, f"{project_name}_{stem_key}", instrument_name=instrument_name)
-                    xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
-                    results[stem_key] = xml_path
+            if stem_key in stems:
+                stem_path = stems[stem_key]
+                if is_silent(stem_path):
+                    print(f"Skipping {stem_key}: silent stem detected.")
+                    return
+                print(f"Transcribing {stem_key}...")
+                midi_path = await transcription_service.transcribe_melody(stem_path, f"{project_name}_{stem_key}", instrument_name=instrument_name)
+                xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
+                results[stem_key] = xml_path
 
-        # Transcribe pitched instruments concurrently (max 2 at a time via semaphore lock)
-        tasks = [
-            transcribe_if_audible("bass", "bass"),
-            transcribe_if_audible("guitar", "guitar"),
-            transcribe_if_audible("other", "other"),
-            transcribe_if_audible("vocals", "vocals"),
-            transcribe_if_audible("piano", "piano")
-        ]
+        # Transcribe instruments sequentially (MT3 is synchronous GPU-bound, cannot parallelize via asyncio)
+        await transcribe_if_audible("bass", "bass")
+        await transcribe_if_audible("guitar", "guitar")
+        await transcribe_if_audible("other", "other")
+        await transcribe_if_audible("vocals", "vocals")
+        await transcribe_if_audible("piano", "piano")
         if "keys" in stems and "piano" not in stems:
-            tasks.append(transcribe_if_audible("keys", "piano"))
-
-        await asyncio.gather(*tasks)
+            await transcribe_if_audible("keys", "piano")
 
         # Drums: audio stem is served for playback, but NO sheet music is generated
             
