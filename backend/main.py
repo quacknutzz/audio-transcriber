@@ -201,6 +201,20 @@ async def upload_audio(file: UploadFile = File(...), background_tasks: Backgroun
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/history")
+async def get_history():
+    """Return all completed transcription jobs for the history panel."""
+    history = []
+    for filename, status_data in job_status.items():
+        if status_data.get("status") == "completed":
+            history.append({
+                "filename": filename,
+                "results": status_data.get("results", {}),
+                "stems": status_data.get("stems", {}),
+                "message": status_data.get("message", ""),
+            })
+    return history
+
 @app.get("/status/{filename}")
 async def get_status(filename: str):
     status = job_status.get(filename)

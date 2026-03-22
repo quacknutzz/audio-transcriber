@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react';
 import dynamic from 'next/dynamic';
+import HistoryPanel from './components/HistoryPanel';
 
 const ScoreDisplay = dynamic(() => import('./components/ScoreDisplay'), { ssr: false });
 
@@ -63,6 +64,7 @@ export default function Home() {
   const [activeStem, setActiveStem] = useState<string | null>(null);
   const [musicXml, setMusicXml] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scoreRef = useRef<HTMLDivElement>(null);
 
@@ -196,6 +198,17 @@ export default function Home() {
 
       {/* ── Content wrapper ──────────────────────────────── */}
       <div className="relative z-10 flex flex-col items-center w-full max-w-6xl px-6 py-12 lg:py-20">
+
+        {/* ── History toggle (top-right) ────────────────── */}
+        <button
+          onClick={() => setHistoryOpen(true)}
+          className="fixed top-5 right-5 z-30 w-10 h-10 rounded-xl bg-slate-800/60 border border-slate-700/50 hover:bg-slate-700/60 backdrop-blur-sm flex items-center justify-center transition-all hover:scale-105 active:scale-95 group shadow-lg"
+          title="Transcription History"
+        >
+          <svg className="w-[18px] h-[18px] text-slate-400 group-hover:text-indigo-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </button>
 
         {/* ── Header ─────────────────────────────────────── */}
         <div className="text-center mb-14 space-y-4">
@@ -479,6 +492,24 @@ export default function Home() {
         )}
 
       </div>
+
+      {/* ── History Side Panel ──────────────────────────── */}
+      <HistoryPanel
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onLoadSong={(results, stems, filename) => {
+          setAvailableStems(results);
+          setAvailableStemsAudio(stems);
+          setActiveStem(null);
+          setMusicXml(null);
+          setUploading(false);
+          setMessage(`Loaded: ${filename.replace(/\.[^/.]+$/, '')}`);
+        }}
+        onViewScore={(instrumentName, xmlUrl) => {
+          loadXmlData(instrumentName, xmlUrl);
+        }}
+        downloadFile={downloadFile}
+      />
     </main>
   );
 }
