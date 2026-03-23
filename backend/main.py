@@ -215,6 +215,32 @@ async def get_history():
             })
     return history
 
+@app.delete("/history/{filename}")
+async def delete_history_item(filename: str):
+    """Deeply clear a job from RAM memory and physically delete all its generated XMLs/stems off the SSD."""
+    if filename not in job_status:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    del job_status[filename]
+    project_name = Path(filename).stem
+    
+    # 1. Delete original upload
+    orig_file = UPLOAD_DIR / filename
+    if orig_file.exists():
+        orig_file.unlink()
+        
+    # 2. Delete generated XMLs and MIDIs
+    for ext, folder in [(".musicxml", "xml"), (".mid", "midi")]:
+        for filepath in (OUTPUT_DIR / folder).glob(f"{project_name}_*{ext}"):
+            filepath.unlink()
+            
+    # 3. Delete heavy Demucs stem folder structure
+    stem_dir = OUTPUT_DIR / "stems" / project_name
+    if stem_dir.exists():
+        shutil.rmtree(stem_dir)
+        
+    return {"status": "success", "message": f"Deleted {filename} entirely."}
+
 @app.get("/status/{filename}")
 async def get_status(filename: str):
     status = job_status.get(filename)

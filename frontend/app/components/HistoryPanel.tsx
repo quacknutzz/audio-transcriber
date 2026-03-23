@@ -41,6 +41,21 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
         setExpandedSong(expandedSong === filename ? null : filename);
     };
 
+    const handleDelete = async (e: React.MouseEvent, filename: string) => {
+        e.stopPropagation();
+        if (!window.confirm(`Permanently delete ${filename} and all its generated scores off your hard drive?`)) return;
+
+        try {
+            const res = await fetch(`http://127.0.0.1:8000/history/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            if (res.ok) {
+                setHistory(prev => prev.filter(item => item.filename !== filename));
+                if (expandedSong === filename) setExpandedSong(null);
+            }
+        } catch (err) {
+            console.error("Failed to delete", err);
+        }
+    };
+
     // Strip file extension for display
     const displayName = (filename: string) => filename.replace(/\.[^/.]+$/, '');
 
@@ -123,6 +138,18 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
                                         <p className="text-xs font-semibold text-slate-200 truncate">{displayName(item.filename)}</p>
                                         <p className="text-[10px] text-slate-500">{instrumentCount} track{instrumentCount !== 1 ? 's' : ''}</p>
                                     </div>
+
+                                    {/* Delete Button */}
+                                    <button
+                                        onClick={(e) => handleDelete(e, item.filename)}
+                                        className="w-7 h-7 rounded-md text-slate-500 hover:text-red-400 hover:bg-red-500/10 flex items-center justify-center transition-colors shrink-0 mr-1"
+                                        title="Delete Transcription"
+                                    >
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        </svg>
+                                    </button>
+
                                     <svg
                                         className={`w-4 h-4 text-slate-500 transition-transform duration-200 shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
                                         fill="none" stroke="currentColor" viewBox="0 0 24 24"
