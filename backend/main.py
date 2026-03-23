@@ -113,26 +113,86 @@ async def process_audio_task(file_path: Path, filename: str):
         results = {}
         project_name = file_path.stem
         
-        # Helper to transcribe a stem only if it has audible content
-        async def transcribe_if_audible(stem_key: str, instrument_name: str):
+        # ── Multiprocessing: dispatch MT3 stems to 2 parallel OS processes ──
+        from concurrent.futures import ProcessPoolExecutor
+        from services.mt3_worker import transcribe_stem
+        import asyncio
+        
+        loop = asyncio.get_event_loop()
+        midi_output_dir = OUTPUT_DIR / "midi"
+        midi_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect MT3 stems (non-vocals, non-silent)
+        mt3_jobs = []  # (stem_key, instrument_name, stem_path, midi_output_path)
+        vocal_job = None  # vocals go through Basic Pitch in the main process
+        
+        for stem_key, instrument_name in [("bass", "bass"), ("guitar", "guitar"), ("other", "other"), ("piano", "piano")]:
             if stem_key in stems:
                 stem_path = stems[stem_key]
                 if is_silent(stem_path):
                     print(f"Skipping {stem_key}: silent stem detected.")
-                    return
-                print(f"Transcribing {stem_key}...")
-                midi_path = await transcription_service.transcribe_melody(stem_path, f"{project_name}_{stem_key}", instrument_name=instrument_name)
-                xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
-                results[stem_key] = xml_path
-
-        # Transcribe instruments sequentially (MT3 is synchronous GPU-bound, cannot parallelize via asyncio)
-        await transcribe_if_audible("bass", "bass")
-        await transcribe_if_audible("guitar", "guitar")
-        await transcribe_if_audible("other", "other")
-        await transcribe_if_audible("vocals", "vocals")
-        await transcribe_if_audible("piano", "piano")
+                    continue
+                midi_out = str(midi_output_dir / f"{project_name}_{stem_key}_mt3.mid")
+                mt3_jobs.append((stem_key, instrument_name, str(stem_path), midi_out))
+        
+        # Handle keys->piano alias
         if "keys" in stems and "piano" not in stems:
-            await transcribe_if_audible("keys", "piano")
+            stem_path = stems["keys"]
+            if not is_silent(stem_path):
+                midi_out = str(midi_output_dir / f"{project_name}_keys_mt3.mid")
+                mt3_jobs.append(("keys", "piano", str(stem_path), midi_out))
+        
+        # Check for vocals
+        if "vocals" in stems and not is_silent(stems["vocals"]):
+            vocal_job = ("vocals", "vocals")
+        
+        # Dispatch MT3 jobs to 2 parallel GPU worker processes
+        print(f"Dispatching {len(mt3_jobs)} MT3 jobs to 2 parallel workers...")
+        job_status[filename] = {"status": "processing", "progress": 55, "message": f"Transcribing {len(mt3_jobs)} instruments in parallel..."}
+        
+        mt3_futures = {}
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            for stem_key, instrument_name, stem_path_str, midi_out_str in mt3_jobs:
+                future = loop.run_in_executor(
+                    pool,
+                    transcribe_stem,
+                    stem_path_str, midi_out_str, instrument_name
+                )
+                mt3_futures[stem_key] = (future, instrument_name)
+            
+            # While MT3 workers are crunching, run vocals through Basic Pitch in the main process
+            if vocal_job:
+                print("Transcribing vocals via Basic Pitch (main process)...")
+                try:
+                    midi_path = await transcription_service.transcribe_melody(
+                        stems["vocals"], f"{project_name}_vocals", instrument_name="vocals"
+                    )
+                    xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_vocals", audio_ref_path=file_path)
+                    results["vocals"] = xml_path
+                except Exception as e:
+                    print(f"Vocals transcription failed: {e}")
+            
+            # Await all MT3 worker results
+            for stem_key, (future, instrument_name) in mt3_futures.items():
+                try:
+                    midi_path_str = await future
+                    if midi_path_str:  # non-empty means success
+                        midi_path = Path(midi_path_str)
+                        xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
+                        results[stem_key] = xml_path
+                        print(f"✓ {stem_key} transcription complete.")
+                    else:
+                        # MT3 failed in the worker — fall back to Basic Pitch in main process
+                        print(f"MT3 worker failed for {stem_key}, falling back to Basic Pitch...")
+                        midi_path = await transcription_service._transcribe_basic_pitch(
+                            stems[stem_key], f"{project_name}_{stem_key}", instrument_name
+                        )
+                        xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
+                        results[stem_key] = xml_path
+                except Exception as e:
+                    print(f"Worker error for {stem_key}: {e}")
+        
+        print(f"All transcription complete. {len(results)} instruments processed.")
 
         # Drums: audio stem is served for playback, but NO sheet music is generated
             
