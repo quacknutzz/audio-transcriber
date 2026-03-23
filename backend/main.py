@@ -59,11 +59,11 @@ def load_existing_jobs():
         if len(parts) == 2:
             project_name, instrument = parts
             
-            for ext in [".wav", ".mp3", ".m4a"]:
-                virtual_filename = project_name + ext
-                if virtual_filename not in recovered_jobs:
-                    recovered_jobs[virtual_filename] = {}
-                recovered_jobs[virtual_filename][instrument] = f"/xml/{xml_file.name}"
+            # Use a single virtual extension to avoid duplicating history items
+            virtual_filename = project_name + ".mp3"
+            if virtual_filename not in recovered_jobs:
+                recovered_jobs[virtual_filename] = {}
+            recovered_jobs[virtual_filename][instrument] = f"/xml/{xml_file.name}"
           
     for virt_filename, results in recovered_jobs.items():
         # Try to recover stem audio URLs too
@@ -218,11 +218,17 @@ async def get_history():
 @app.delete("/history/{filename}")
 async def delete_history_item(filename: str):
     """Deeply clear a job from RAM memory and physically delete all its generated XMLs/stems off the SSD."""
-    if filename not in job_status:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    del job_status[filename]
     project_name = Path(filename).stem
+    
+    # Sweep ALL virtual extensions from job_status memory
+    deleted_any = False
+    keys_to_delete = [k for k in job_status.keys() if Path(k).stem == project_name]
+    for k in keys_to_delete:
+        del job_status[k]
+        deleted_any = True
+        
+    if not deleted_any:
+        raise HTTPException(status_code=404, detail="Job not found")
     
     # 1. Delete original upload
     orig_file = UPLOAD_DIR / filename
