@@ -146,12 +146,12 @@ async def process_audio_task(file_path: Path, filename: str):
         if "vocals" in stems and not is_silent(stems["vocals"]):
             vocal_job = ("vocals", "vocals")
         
-        # Dispatch MT3 jobs to 2 parallel GPU worker processes
-        print(f"Dispatching {len(mt3_jobs)} MT3 jobs to 2 parallel workers...")
-        job_status[filename] = {"status": "processing", "progress": 55, "message": f"Transcribing {len(mt3_jobs)} instruments in parallel..."}
+        # Dispatch MT3 jobs to a single GPU worker process to prevent VRAM thrashing
+        print(f"Dispatching {len(mt3_jobs)} MT3 jobs...")
+        job_status[filename] = {"status": "processing", "progress": 55, "message": f"Transcribing {len(mt3_jobs)} instruments..."}
         
         mt3_futures = {}
-        with ProcessPoolExecutor(max_workers=2) as pool:
+        with ProcessPoolExecutor(max_workers=1) as pool:
             for stem_key, instrument_name, stem_path_str, midi_out_str in mt3_jobs:
                 future = loop.run_in_executor(
                     pool,
