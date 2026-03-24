@@ -9,8 +9,9 @@ from pathlib import Path
 from services.separation import SeparationService
 from services.transcription import TranscriptionService
 from services.music_processing import MusicProcessingService
+from services.gcs_service import GCSService
 
-app = FastAPI()
+app = FastAPI(title="Audio Transcriber API")
 
 # In-memory dictionary to track processing status
 # Keys are filenames, values are dicts with 'status', 'progress', 'message', and 'results'
@@ -34,6 +35,9 @@ STATE_FILE = OUTPUT_DIR / "state.json"
 separation_service = SeparationService(OUTPUT_DIR / "stems")
 transcription_service = TranscriptionService(OUTPUT_DIR / "midi")
 music_processing_service = MusicProcessingService(OUTPUT_DIR / "xml")
+
+# Initialize robust Google Cloud Storage service securely using JSON key
+gcs_service = GCSService(bucket_name="ghostnote-storage", credentials_path="gcs-key.json")
 
 def save_state():
     """Takes a rigid snapshot of the UI history memory and saves it to disk."""
@@ -137,27 +141,6 @@ async def process_audio_task(file_path: Path, filename: str):
         
         mt3_futures = {}
         with ProcessPoolExecutor(max_workers=1) as pool:
-            for stem_key, instrument_name, stem_path_str, midi_out_str in mt3_jobs:
-                future = loop.run_in_executor(
-                    pool,
-                    transcribe_stem,
-                    stem_path_str, midi_out_str, instrument_name
-                )
-                mt3_futures[stem_key] = (future, instrument_name)
-            
-            # While MT3 workers are crunching, run vocals through Basic Pitch in the main process
-            if vocal_job:
-                print("Transcribing vocals via Basic Pitch (main process)...")
-                try:
-                    midi_path = await transcription_service.transcribe_melody(
-                        stems["vocals"], f"{project_name}_vocals", instrument_name="vocals"
-                    )
-                    xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_vocals", audio_ref_path=file_path)
-                    results["vocals"] = xml_path
-                except Exception as e:
-                    print(f"Vocals transcription failed: {e}")
-            
-            # Await all MT3 worker results
             for stem_key, (future, instrument_name) in mt3_futures.items():
                 try:
                     midi_path_str = await future
@@ -181,29 +164,47 @@ async def process_audio_task(file_path: Path, filename: str):
 
         # Drums: audio stem is served for playback, but NO sheet music is generated
             
-        # Formulate web-accessible URLs
+        # Formulate web-accessible Google Cloud Storage paths
+        # Instead of static URLs, we save the raw object path to memory
         results_urls = {}
         stems_urls = {}
+
+        # Upload XMLs to Google Cloud
         for instrument, local_path in results.items():
-            # Convert system path to web XML URL
-            xml_basename = Path(local_path).name
-            results_urls[instrument] = f"/xml/{xml_basename}"
-            
-            # Formulate the expected stem URL if it exists
-            if instrument in stems:
+            gcs_blob = f"results/{project_name}/{instrument}.musicxml"
+            if gcs_service.client:
+                gcs_service.upload_file(local_path, gcs_blob)
+                results_urls[instrument] = gcs_blob
+            else:
+                # Fallback to local server if GCS fails
+                results_urls[instrument] = f"/xml/{Path(local_path).name}"
+
+        # Upload Stems to Google Cloud
+        for instrument in stems:
+            gcs_blob = f"stems/{project_name}/{instrument}.wav"
+            if gcs_service.client:
+                gcs_service.upload_file(stems[instrument], gcs_blob)
+                stems_urls[instrument] = gcs_blob
+            else:
+                # Fallback to local server
                 try:
                     rel_path = Path(stems[instrument]).relative_to(OUTPUT_DIR / "stems")
                     stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
                 except ValueError:
                     pass
-        
-        # Also serve drum audio for playback (no sheet music)
+
+        # Also upload/serve drum audio for playback (no sheet music)
         if "drums" in stems and "drums" not in stems_urls:
-            try:
-                rel_path = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
-                stems_urls["drums"] = f"/stems/{rel_path.as_posix()}"
-            except ValueError:
-                pass
+            gcs_blob = f"stems/{project_name}/drums.wav"
+            if gcs_service.client:
+                gcs_service.upload_file(stems["drums"], gcs_blob)
+                stems_urls["drums"] = gcs_blob
+            else:
+                try:
+                    rel_path = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
+                    stems_urls["drums"] = f"/stems/{rel_path.as_posix()}"
+                except ValueError:
+                    pass
             
         elapsed = time.time() - start_time
         m, s = divmod(int(elapsed), 60)
@@ -249,16 +250,25 @@ async def upload_audio(file: UploadFile = File(...), background_tasks: Backgroun
 
 @app.get("/history")
 async def get_history():
-    """Return all completed transcription jobs for the history panel."""
     history = []
     for filename, status_data in job_status.items():
         if status_data.get("status") == "completed":
-            history.append({
+            item = {
                 "filename": filename,
-                "results": status_data.get("results", {}),
-                "stems": status_data.get("stems", {}),
-                "message": status_data.get("message", ""),
-            })
+                "message": status_data.get("message"),
+                "results": status_data.get("results"),
+                "stems": status_data.get("stems")
+            }
+            # Dynamically convert raw GCS blobs to secure 2-hour Signed URLs for the React UI!
+            if gcs_service.client:
+                signed_results = {inst: gcs_service.generate_signed_url(blob) for inst, blob in item["results"].items() if not str(blob).startswith("/xml")}
+                signed_stems = {inst: gcs_service.generate_signed_url(blob) for inst, blob in item["stems"].items() if not str(blob).startswith("/stems")}
+                
+                # Merge signed URLs with any local fallback URLs
+                item["results"] = {**item["results"], **signed_results}
+                item["stems"] = {**item["stems"], **signed_stems}
+
+            history.append(item)
     return history
 
 @app.delete("/history/{filename}")
@@ -286,10 +296,15 @@ async def delete_history_item(filename: str):
         for filepath in (OUTPUT_DIR / folder).glob(f"{project_name}_*{ext}"):
             filepath.unlink()
             
-    # 3. Delete heavy Demucs stem folder structure
+    # 3. Delete heavy Demucs stem folder structure locally
     stem_dir = OUTPUT_DIR / "stems" / project_name
     if stem_dir.exists():
         shutil.rmtree(stem_dir)
+        
+    # 4. Delete the files remotely from Google Cloud Storage so they don't accrue orphan costs
+    if gcs_service.client:
+        gcs_service.delete_directory(f"results/{project_name}/")
+        gcs_service.delete_directory(f"stems/{project_name}/")
         
     if deleted_any:
         save_state()  # Re-snapshot state.json so it stays dead on next boot
@@ -301,7 +316,21 @@ async def get_status(filename: str):
     status = job_status.get(filename)
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
-    return status
+        
+    status_data = dict(job_status[filename])
+    
+    # If completed, inject dynamic Signed URLs for React frontend to download/play
+    if status_data.get("status") == "completed" and gcs_service.client:
+        results = status_data.get("results", {})
+        stems = status_data.get("stems", {})
+        
+        signed_results = {inst: gcs_service.generate_signed_url(blob) for inst, blob in results.items() if not str(blob).startswith("/xml")}
+        signed_stems = {inst: gcs_service.generate_signed_url(blob) for inst, blob in stems.items() if not str(blob).startswith("/stems")}
+        
+        status_data["results"] = {**results, **signed_results}
+        status_data["stems"] = {**stems, **signed_stems}
+
+    return status_data
 
 if __name__ == "__main__":
     import uvicorn
