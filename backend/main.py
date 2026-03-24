@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
 import asyncio
+import json
 from pathlib import Path
 from services.separation import SeparationService
 from services.transcription import TranscriptionService
@@ -28,10 +29,19 @@ UPLOAD_DIR = Path("uploads")
 OUTPUT_DIR = Path("processed")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+STATE_FILE = OUTPUT_DIR / "state.json"
 
 separation_service = SeparationService(OUTPUT_DIR / "stems")
 transcription_service = TranscriptionService(OUTPUT_DIR / "midi")
 music_processing_service = MusicProcessingService(OUTPUT_DIR / "xml")
+
+def save_state():
+    """Takes a rigid snapshot of the UI history memory and saves it to disk."""
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(job_status, f)
+    except Exception as e:
+        print(f"Failed to save state.json: {e}")
 
 # Mount the XML directory statically so the frontend can read the generated files
 app.mount("/xml", StaticFiles(directory=str(OUTPUT_DIR / "xml")), name="xml")
@@ -44,44 +54,19 @@ def read_root():
 @app.on_event("startup")
 def load_existing_jobs():
     """
-    On server boot, scan the processed directory and populate job_status
-    so the UI can still display results for past transcribed files.
+    On server boot, load the rigid state.json file to perfectly restore the UI history.
     """
-    if not (OUTPUT_DIR / "xml").exists():
-        return
-        
-    # Group found XML files by their original filename root (e.g., test_audio_piano.musicxml -> test_audio)
-    recovered_jobs = {}
-    for xml_file in (OUTPUT_DIR / "xml").glob("*.musicxml"):
-        # Files are named like: projectname_instrument.musicxml
-        # We need to extract 'projectname'
-        parts = xml_file.stem.rsplit("_", 1)
-        if len(parts) == 2:
-            project_name, instrument = parts
-            
-            # Use a single virtual extension to avoid duplicating history items
-            virtual_filename = project_name + ".mp3"
-            if virtual_filename not in recovered_jobs:
-                recovered_jobs[virtual_filename] = {}
-            recovered_jobs[virtual_filename][instrument] = f"/xml/{xml_file.name}"
-          
-    for virt_filename, results in recovered_jobs.items():
-        # Try to recover stem audio URLs too
-        stems_urls = {}
-        for instrument in results.keys():
-            parts = list((OUTPUT_DIR / "stems").glob(f"**/htdemucs_6s/**/{instrument}.wav"))
-            if parts:
-                rel_path = parts[0].relative_to(OUTPUT_DIR / "stems")
-                stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
-                
-        job_status[virt_filename] = {
-            "status": "completed", 
-            "progress": 100, 
-            "message": "Loaded from history.",
-            "results": results,
-            "stems": stems_urls
-        }
-    print(f"Loaded {len(recovered_jobs)} previous jobs into memory.")
+    global job_status
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r") as f:
+                saved_status = json.load(f)
+                # Only load fully completed jobs so broken/processing ones from a crash don't get stuck
+                completed_jobs = {k: v for k, v in saved_status.items() if v.get("status") == "completed"}
+                job_status.update(completed_jobs)
+            print(f"Loaded {len(completed_jobs)} previous jobs from state.json perfectly.")
+        except Exception as e:
+            print(f"Failed to load state.json: {e}")
 
 def is_silent(audio_path: Path, threshold: float = 0.01) -> bool:
     """Check if an audio file is essentially silent by reading peak amplitude."""
@@ -232,6 +217,7 @@ async def process_audio_task(file_path: Path, filename: str):
             "results": results_urls,
             "stems": stems_urls
         }
+        save_state()  # Snapshot UI state to disk so it survives app restarts
         
     except Exception as e:
         print(f"Error processing {filename}: {e}")
@@ -304,6 +290,9 @@ async def delete_history_item(filename: str):
     stem_dir = OUTPUT_DIR / "stems" / project_name
     if stem_dir.exists():
         shutil.rmtree(stem_dir)
+        
+    if deleted_any:
+        save_state()  # Re-snapshot state.json so it stays dead on next boot
         
     return {"status": "success", "message": f"Deleted {filename} entirely."}
 
