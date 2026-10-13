@@ -189,7 +189,8 @@ async def process_audio_task(file_path: Path, filename: str):
             "progress": 100,
             "message": f"Transcription completed in {time_str}!",
             "results": results_urls,
-            "stems": stems_urls
+            "stems": stems_urls,
+            "updated_at": time.time()
         }
         save_state()
         logger.info(f"Completed job {filename} in {time_str}. {len(results_urls)} scores created.")
@@ -260,7 +261,7 @@ async def get_status(filename: str):
 
 @app.get("/history")
 async def get_history():
-    """Returns all historical completed songs for the side panel."""
+    """Returns all historical completed songs, newest first."""
     history = []
     for filename, status_data in job_status.items():
         if status_data.get("status") == "completed":
@@ -268,8 +269,10 @@ async def get_history():
                 "filename": filename,
                 "results": status_data.get("results", {}),
                 "stems": status_data.get("stems", {}),
-                "message": status_data.get("message", "")
+                "message": status_data.get("message", ""),
+                "updated_at": status_data.get("updated_at", 0)
             })
+    history.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
     return history
 
 @app.delete("/history/{filename}")

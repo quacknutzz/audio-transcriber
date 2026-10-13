@@ -92,36 +92,52 @@ class MusicProcessingService:
             else:
                 new_part.insert(0, music21.instrument.Piano()) # Default
 
-            # 2. Smart Quantization
+            # 2. Smart Quantization & Voice Separation
             # Grid = 16th note (0.25)
             grid = 0.25
+            is_monophonic = any(m in name_lower for m in ["vocal", "voice", "bass"])
+            is_drum = any(d in name_lower for d in ["drums", "drum", "percussion"])
+            last_end_offset = 0.0
             
-            # CRITICAL FIX: Use flatten().notes to get absolute song offsets instead of measure-relative!
+            import copy
+            # Use flatten().notes to get absolute song offsets instead of measure-relative!
             for el in original_part.flatten().notes:
+                # If an incoming element was grouped as a chord in a monophonic track, extract the melody/root
+                if el.isChord and is_monophonic:
+                    chosen_pitch = max(el.pitches) if "bass" not in name_lower else min(el.pitches)
+                    single_note = music21.note.Note(chosen_pitch)
+                    single_note.quarterLength = el.quarterLength
+                    single_note.offset = el.offset
+                    el = single_note
+
                 # Snap offset (start time)
                 raw_offset = el.offset
                 quantized_offset = round(raw_offset / grid) * grid
                 
+                # For monophonic lines, ensure notes do not overlap or collide at the same offset
+                if is_monophonic and quantized_offset < last_end_offset:
+                    quantized_offset = last_end_offset
+                
                 # Snap duration
                 raw_dur = el.duration.quarterLength
                 quantized_dur = round(raw_dur / grid) * grid
-                if quantized_dur < grid: quantized_dur = grid # Min duration
+                if quantized_dur < grid: 
+                    quantized_dur = grid # Min duration
                 
-                # Clone and adjust using deepcopy to safely preserve Unpitched and PercussionChord elements
-                import copy
                 new_el = copy.deepcopy(el)
-                
                 if hasattr(new_el, 'volume') and hasattr(el, 'volume') and el.volume is not None:
                     new_el.volume = el.volume
                 new_el.quarterLength = quantized_dur
                 
                 # Insert at new absolute offset
                 new_part.insert(quantized_offset, new_el)
+                if is_monophonic:
+                    last_end_offset = quantized_offset + quantized_dur
 
-            # 3. Chordify (ONLY for pitched instruments)
-            # Chordify guarantees clean notation by merging overlapping polyphony into solid blocks.
-            # But it destroys Unpitched drum tracking, so we skip it for drums.
-            if "drums" not in name_lower and "drum" not in name_lower:
+            # 3. Chordify (ONLY for polyphonic pitched instruments: piano, guitar, keys, other)
+            # Vocals and bass are monophonic melodies and must NEVER be chordified.
+            # Drums are percussion instruments and must NEVER be chordified.
+            if not is_monophonic and not is_drum:
                 new_part = new_part.chordify()
 
             # 4. Clean up notation (ties, beams)

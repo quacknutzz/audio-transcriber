@@ -98,16 +98,20 @@ class TranscriptionService:
         
         inst = instrument_name.lower()
         if inst == "bass":
-            # Filter to bass fundamental register only (40Hz to 400Hz) to prevent drum bleed
+            # Filter to bass fundamental register only (40Hz to 350Hz) to prevent drum/bleed overlap
             onset_threshold = 0.6
-            frame_threshold = 0.35
+            frame_threshold = 0.38
             minimum_frequency = 40.0
-            maximum_frequency = 400.0
+            maximum_frequency = 350.0
+            minimum_note_length = 80.0
         elif inst == "vocals":
-            # Sensitive onsets, slightly longer minimum note to avoid micro-jitter
-            onset_threshold = 0.45
-            frame_threshold = 0.3
-            minimum_note_length = 65.0
+            # Constrain to human vocal frequency range (C3: ~130Hz to C6: ~1100Hz)
+            # Higher onset sensitivity to catch quiet syllables, but strict frequency to drop rumble/bleed
+            onset_threshold = 0.55
+            frame_threshold = 0.35
+            minimum_frequency = 130.0
+            maximum_frequency = 1100.0
+            minimum_note_length = 70.0
         
         expected_output = self.output_dir / f"{audio_path.stem}_basic_pitch.mid"
         if expected_output.exists():
@@ -136,9 +140,83 @@ class TranscriptionService:
                     import shutil
                     shutil.copy2(expected_output, output_midi_path)
                     expected_output.unlink(missing_ok=True)
+            
+            # Post-transcription acoustic energy gating and overtone cleanup
+            self._clean_and_filter_midi(output_midi_path, audio_path, instrument_name)
             return output_midi_path
         else:
             raise RuntimeError(f"Basic Pitch failed to create {expected_output}")
+
+    def _clean_and_filter_midi(self, midi_path: Path, audio_path: Path, instrument_name: str):
+        """
+        Cleans and post-processes transcribed MIDI:
+        1. Energy gating: Drops phantom notes that occur during silence or stem bleed (e.g. song intros).
+        2. Monophonizing: For monophonic lines (vocals and bass), removes simultaneous overtone harmonics
+           and trims overlapping note boundaries so the melody line remains clean single-voice.
+        """
+        import pretty_midi
+        inst = instrument_name.lower()
+        
+        try:
+            pm = pretty_midi.PrettyMIDI(str(midi_path))
+            if not pm.instruments:
+                return
+            
+            # Load stem audio for RMS energy gating
+            y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
+            
+            # Vocal RMS threshold is 0.003, bass is 0.004, others 0.002
+            rms_thresh = 0.003 if inst == "vocals" else (0.004 if inst == "bass" else 0.002)
+            peak_thresh = 0.008
+            
+            for instrument in pm.instruments:
+                if instrument.is_drum:
+                    continue
+                
+                # 1. Energy gating
+                filtered_notes = []
+                for n in instrument.notes:
+                    start_idx = int(n.start * sr)
+                    end_idx = int(n.end * sr)
+                    if start_idx >= len(y):
+                        continue
+                    chunk = y[start_idx:min(end_idx, len(y))]
+                    if len(chunk) == 0:
+                        continue
+                    rms = float(np.sqrt(np.mean(chunk**2)))
+                    peak = float(np.max(np.abs(chunk)))
+                    
+                    if rms >= rms_thresh and peak >= peak_thresh:
+                        filtered_notes.append(n)
+                        
+                # 2. Monophonize vocals and bass
+                if inst in ["vocals", "bass"]:
+                    sorted_notes = sorted(filtered_notes, key=lambda n: (n.start, -n.velocity))
+                    mono_notes = []
+                    for n in sorted_notes:
+                        if not mono_notes:
+                            mono_notes.append(n)
+                            continue
+                        prev = mono_notes[-1]
+                        # If start times are within 60ms, it's an overtone harmonic
+                        if abs(n.start - prev.start) < 0.06:
+                            # Higher velocity or lower pitch (fundamental)
+                            if n.velocity > prev.velocity:
+                                mono_notes[-1] = n
+                            continue
+                        # If overlapping transition
+                        if n.start < prev.end:
+                            prev.end = max(prev.start + 0.06, n.start)
+                        if n.start >= prev.end:
+                            mono_notes.append(n)
+                    instrument.notes = mono_notes
+                else:
+                    instrument.notes = filtered_notes
+            
+            pm.write(str(midi_path))
+            self.logger.info(f"Post-processed MIDI for {instrument_name}: kept {sum(len(i.notes) for i in pm.instruments)} clean notes.")
+        except Exception as e:
+            self.logger.warning(f"Post-processing MIDI failed for {instrument_name} ({e}), keeping raw MIDI.")
 
     async def _transcribe_drums(self, audio_path: Path, output_name: str) -> Path:
         """
