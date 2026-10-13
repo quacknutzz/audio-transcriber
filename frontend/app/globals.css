@@ -1,10 +1,12 @@
 @import "tailwindcss";
 
-/* ── Base theme ──────────────────────────────────────────── */
+/* ── Base theme: Coffee Gray, Obsidian Black, Bone White ── */
 :root {
-  --foreground-rgb: 241, 245, 249;
-  /* slate-100 */
-  --background-rgb: 6, 8, 15;
+  --foreground-rgb: 242, 240, 235;
+  --background-rgb: 15, 14, 13;
+  --coffee-card: 26, 25, 23;
+  --coffee-border: 48, 45, 41;
+  --coffee-muted: 145, 138, 128;
 }
 
 body {
@@ -14,67 +16,37 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Custom animations ───────────────────────────────────── */
+/* ── Subtle fade animations (no glossy sweeps) ────────────── */
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(6px);
   }
-
   to {
     opacity: 1;
     transform: translateY(0);
   }
 }
 
-@keyframes shimmer {
-  0% {
-    transform: translateX(-100%);
-  }
-
-  100% {
-    transform: translateX(200%);
-  }
-}
-
-@keyframes slideUp {
-  from {
-    opacity: 0;
-    transform: translateY(24px) scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
 .animate-fadeIn {
-  animation: fadeIn 0.5s ease-out both;
+  animation: fadeIn 0.3s ease-out both;
 }
 
-.animate-slideUp {
-  animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.animate-shimmer {
-  animation: shimmer 2s ease-in-out infinite;
-}
-
-/* ── Audio player dark theme ─────────────────────────────── */
+/* ── Audio player: clean matte dark grayscale (no neon hue) ── */
 audio {
-  filter: invert(1) hue-rotate(180deg);
-  border-radius: 999px;
+  filter: invert(0.92) contrast(1.1) grayscale(1);
+  border-radius: 8px;
+  height: 32px;
 }
 
 audio::-webkit-media-controls-panel {
-  background: transparent;
+  background: #e5e0d8;
 }
 
-/* ── Scrollbar styling ───────────────────────────────────── */
+/* ── Tactile scrollbar styling ───────────────────────────── */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -82,16 +54,16 @@ audio::-webkit-media-controls-panel {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.3);
+  background: rgba(140, 130, 120, 0.25);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.5);
+  background: rgba(140, 130, 120, 0.45);
 }
 
 /* ── Selection ───────────────────────────────────────────── */
 ::selection {
-  background: rgba(168, 85, 247, 0.3);
-  color: white;
+  background: rgba(214, 206, 194, 0.25);
+  color: #faf9f6;
 }

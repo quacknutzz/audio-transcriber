@@ -17,24 +17,14 @@ const INSTRUMENT_ICONS: Record<string, string> = {
   keys: '🎹',
 };
 
-const INSTRUMENT_COLORS: Record<string, { from: string; to: string; ring: string; badge: string }> = {
-  vocals: { from: 'from-sky-500', to: 'to-blue-600', ring: 'ring-sky-500/40', badge: 'bg-sky-500/10 text-sky-400 border-sky-500/20' },
-  piano: { from: 'from-violet-500', to: 'to-purple-600', ring: 'ring-violet-500/40', badge: 'bg-violet-500/10 text-violet-400 border-violet-500/20' },
-  guitar: { from: 'from-emerald-500', to: 'to-teal-600', ring: 'ring-emerald-500/40', badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
-  bass: { from: 'from-amber-500', to: 'to-orange-600', ring: 'ring-amber-500/40', badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },
-  drums: { from: 'from-rose-500', to: 'to-red-600', ring: 'ring-rose-500/40', badge: 'bg-rose-500/10 text-rose-400 border-rose-500/20' },
-  other: { from: 'from-fuchsia-500', to: 'to-pink-600', ring: 'ring-fuchsia-500/40', badge: 'bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/20' },
-  keys: { from: 'from-violet-500', to: 'to-purple-600', ring: 'ring-violet-500/40', badge: 'bg-violet-500/10 text-violet-400 border-violet-500/20' },
-};
-
 const INSTRUMENT_ORDER = ['vocals', 'piano', 'guitar', 'bass', 'drums', 'other'];
 
 /* ── Pipeline stages for progress display ────────────────── */
 const STAGES = [
   { key: 'upload', label: 'Upload', threshold: 5 },
-  { key: 'separate', label: 'Separating Stems', threshold: 10 },
+  { key: 'separate', label: 'Stem Separation', threshold: 10 },
   { key: 'transcribe', label: 'Transcribing', threshold: 50 },
-  { key: 'render', label: 'MusicXML', threshold: 90 },
+  { key: 'render', label: 'Notation Export', threshold: 90 },
   { key: 'complete', label: 'Ready', threshold: 100 },
 ];
 
@@ -72,7 +62,7 @@ export default function Home() {
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
 
-  // Active Song Studio state
+  // Active Studio state
   const [currentSong, setCurrentSong] = useState<string | null>(null);
   const [historyList, setHistoryList] = useState<HistoryItem[]>([]);
   const [showUpload, setShowUpload] = useState(false);
@@ -177,7 +167,6 @@ export default function Home() {
           setProgress(data.progress || 10);
           pollStatus(data.filename);
         } else {
-          // If no background job is processing, load recent history and auto-load the newest song
           refreshHistory().then(history => {
             if (history && history.length > 0) {
               handleLoadSong(history[0]);
@@ -235,7 +224,7 @@ export default function Home() {
       });
       if (!response.ok) throw new Error('Upload failed');
       const data = await response.json();
-      setMessage('Processing started on RTX GPU...');
+      setMessage('Processing started on local GPU...');
       pollStatus(data.filename);
     } catch (err: any) {
       console.error('Upload error:', err);
@@ -279,21 +268,6 @@ export default function Home() {
     setTimeout(() => pollStatus(filename), 2500);
   };
 
-  /* ── Reset to empty home ───────────────────────────────── */
-  const resetApp = () => {
-    setFile(null);
-    setUploading(false);
-    setMessage('');
-    setProgress(0);
-    setCurrentSong(null);
-    setAvailableStems({});
-    setAvailableStemsAudio({});
-    setActiveStem(null);
-    setActiveAudio(null);
-    setMusicXml(null);
-    setShowUpload(true);
-  };
-
   /* ── Combined list of active instruments ────────────────── */
   const allInstrumentKeys = Array.from(
     new Set([
@@ -308,64 +282,54 @@ export default function Home() {
 
   /* ─────────────────────────────── RENDER ────────────────── */
   return (
-    <main className="relative min-h-screen flex flex-col items-center overflow-x-hidden bg-[#06080f] text-slate-100 font-sans selection:bg-fuchsia-500/30">
+    <main className="relative min-h-screen flex flex-col items-center bg-[#0d0c0b] text-[#f2f0eb] font-sans antialiased selection:bg-[#3d3831] selection:text-[#faf9f6]">
 
-      {/* ── Ambient background ───────────────────────────── */}
-      <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute top-[-20%] left-[-15%] w-[60vw] h-[60vw] bg-indigo-600/[0.07] rounded-full blur-[140px]" />
-        <div className="absolute bottom-[-20%] right-[-15%] w-[70vw] h-[70vw] bg-fuchsia-600/[0.06] rounded-full blur-[160px]" />
-        <div className="absolute top-[40%] left-[50%] w-[30vw] h-[30vw] bg-cyan-500/[0.04] rounded-full blur-[120px]" />
-      </div>
-
-      {/* ── Subtle grid overlay ──────────────────────────── */}
+      {/* ── Minimal tactile grid texture ────────────────── */}
       <div
-        className="pointer-events-none fixed inset-0 opacity-[0.03]"
+        className="pointer-events-none fixed inset-0 opacity-[0.02]"
         style={{
-          backgroundImage: 'linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)',
-          backgroundSize: '40px 40px',
+          backgroundImage: 'linear-gradient(rgba(240,235,225,0.15) 1px, transparent 1px), linear-gradient(90deg, rgba(240,235,225,0.15) 1px, transparent 1px)',
+          backgroundSize: '32px 32px',
         }}
       />
 
-      {/* ── Content wrapper ──────────────────────────────── */}
-      <div className="relative z-10 flex flex-col items-center w-full max-w-6xl px-6 py-8 lg:py-14">
+      {/* ── Content container ────────────────────────────── */}
+      <div className="relative z-10 flex flex-col items-center w-full max-w-5xl px-6 py-8 sm:py-12">
 
-        {/* ── History toggle button (top-right) ──────────── */}
+        {/* ── History button (top-right) ─────────────────── */}
         <button
           onClick={() => setHistoryOpen(true)}
-          className="fixed top-5 right-5 z-30 px-3.5 py-2 rounded-xl bg-slate-800/80 border border-slate-700/60 hover:bg-slate-700/80 backdrop-blur-md flex items-center gap-2 transition-all hover:scale-105 active:scale-95 group shadow-xl"
+          className="fixed top-5 right-5 z-30 px-3 py-1.5 rounded-lg bg-[#191816] border border-[#2e2b27] hover:bg-[#252320] hover:border-[#423e38] flex items-center gap-2 transition-colors group shadow-md"
           title="Transcription History"
         >
-          <svg className="w-4 h-4 text-indigo-400 group-hover:text-indigo-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="w-3.5 h-3.5 text-[#a8a196] group-hover:text-[#edeae4] transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span className="text-xs font-semibold text-slate-300 group-hover:text-white">History</span>
+          <span className="text-xs font-medium text-[#c4beb3] group-hover:text-white">History</span>
           {historyList.length > 0 && (
-            <span className="text-[10px] font-bold px-1.5 py-0.2 rounded-full bg-indigo-500/30 text-indigo-300 border border-indigo-500/40">
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#252320] text-[#a8a196] border border-[#36332e]">
               {historyList.length}
             </span>
           )}
         </button>
 
-        {/* ── Header ─────────────────────────────────────── */}
-        <div className="text-center mb-8 space-y-3">
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-slate-700/50 bg-slate-800/40 backdrop-blur-sm text-xs font-medium text-slate-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            100% Local AI Multi-Instrument Transcription
+        {/* ── Minimalist Header ──────────────────────────── */}
+        <div className="text-center mb-8 space-y-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#2b2926] bg-[#161514] text-[11px] font-mono text-[#8a847b]">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#bbb4a8]" />
+            Local Audio-to-Score Transcription
           </div>
-          <h1 className="text-4xl lg:text-6xl tracking-tight font-black text-transparent bg-clip-text bg-gradient-to-br from-white via-slate-200 to-slate-400">
-            Ghost<span className="bg-gradient-to-r from-indigo-400 via-fuchsia-400 to-rose-400 bg-clip-text">Note</span>
+          <h1 className="text-3xl sm:text-5xl tracking-tight font-black text-[#f4f2ed]">
+            Ghost<span className="text-[#969085] font-light">Note</span>
           </h1>
         </div>
 
         {/* ── Recent Songs Switcher Bar ──────────────────── */}
         {historyList.length > 0 && (
-          <div className="w-full max-w-4xl mb-8 flex flex-col items-center">
-            <div className="flex items-center gap-2 flex-wrap justify-center p-2 rounded-2xl bg-slate-900/40 border border-slate-800/80 backdrop-blur-md shadow-lg">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 px-2 flex items-center gap-1.5">
-                <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                </svg>
-                Songs:
+          <div className="w-full mb-8 flex flex-col items-center">
+            <div className="flex items-center gap-1.5 flex-wrap justify-center p-1.5 rounded-xl bg-[#151413] border border-[#262421] shadow-inner">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[#69645d] px-2.5">
+                Projects:
               </span>
 
               {historyList.map((item) => {
@@ -376,17 +340,17 @@ export default function Home() {
                     key={item.filename}
                     onClick={() => handleLoadSong(item)}
                     className={`
-                      px-3 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 active:scale-95
+                      px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 active:scale-98
                       ${isSelected
-                        ? 'bg-gradient-to-r from-indigo-600/40 to-fuchsia-600/30 text-white border border-indigo-500/60 shadow-[0_0_15px_-3px_rgba(99,102,241,0.3)] ring-1 ring-indigo-400/40'
-                        : 'bg-slate-800/40 text-slate-400 hover:text-slate-200 hover:bg-slate-700/40 border border-slate-700/40'
+                        ? 'bg-[#282623] text-[#ffffff] border border-[#d6cfc2] shadow-sm'
+                        : 'bg-[#1b1a18] text-[#9c958b] hover:text-[#edeae4] hover:bg-[#22201d] border border-[#2a2825]'
                       }
                     `}
-                    title={`Load ${dName}`}
+                    title={`Open ${dName}`}
                   >
-                    <span>🎵</span>
-                    <span className="truncate max-w-[160px] sm:max-w-[220px]">{dName}</span>
-                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />}
+                    <span className="text-xs">🎵</span>
+                    <span className="truncate max-w-[150px] sm:max-w-[200px]">{dName}</span>
+                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-[#ded8ce]" />}
                   </button>
                 );
               })}
@@ -395,10 +359,10 @@ export default function Home() {
               <button
                 onClick={() => setShowUpload(!showUpload)}
                 className={`
-                  px-3 py-1.5 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 border active:scale-95
+                  px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 border active:scale-98
                   ${showUpload
-                    ? 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40'
-                    : 'bg-slate-800/20 text-slate-400 hover:text-slate-200 border-dashed border-slate-700/60 hover:bg-slate-800/50'
+                    ? 'bg-[#292623] text-[#edeae4] border-[#4a453e]'
+                    : 'bg-[#161514] text-[#736d64] hover:text-[#c7c0b4] border-dashed border-[#302d29] hover:bg-[#1e1d1b]'
                   }
                 `}
                 title="Transcribe a new audio file"
@@ -410,27 +374,27 @@ export default function Home() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                   )}
                 </svg>
-                {showUpload ? 'Close' : '+ New Upload'}
+                {showUpload ? 'Close' : '+ New Audio'}
               </button>
             </div>
           </div>
         )}
 
-        {/* ── Upload Box (Conditional or toggled) ─────────── */}
+        {/* ── Minimalist Upload Dropzone ─────────────────── */}
         {(showUpload || !currentSong) && (
-          <div className="w-full max-w-2xl mb-10 animate-fadeIn">
+          <div className="w-full max-w-xl mb-8 animate-fadeIn">
             <div
               onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
               onClick={() => fileInputRef.current?.click()}
               className={`
-                relative group cursor-pointer rounded-2xl border-2 border-dashed transition-all duration-300
+                relative cursor-pointer rounded-xl border border-dashed transition-all duration-200
                 ${isDragging
-                  ? 'border-indigo-400 bg-indigo-500/10 scale-[1.02]'
+                  ? 'border-[#d4cdbf] bg-[#1e1c1a]'
                   : file
-                    ? 'border-emerald-500/40 bg-emerald-500/5'
-                    : 'border-slate-700/60 bg-slate-900/40 hover:border-slate-500/60 hover:bg-slate-800/30'
+                    ? 'border-[#948d81] bg-[#1a1917]'
+                    : 'border-[#2d2b27] bg-[#141312] hover:border-[#45413a] hover:bg-[#181716]'
                 }
               `}
             >
@@ -442,146 +406,136 @@ export default function Home() {
                 className="hidden"
               />
 
-              <div className="flex flex-col items-center justify-center py-8 px-6 gap-3">
+              <div className="flex flex-col items-center justify-center py-7 px-5 gap-2.5 text-center">
                 {file ? (
                   <>
-                    <div className="w-12 h-12 rounded-xl bg-emerald-500/20 flex items-center justify-center">
-                      <svg className="w-6 h-6 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div className="w-9 h-9 rounded-lg bg-[#252320] border border-[#3b3832] flex items-center justify-center text-[#ded9ce]">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                       </svg>
                     </div>
-                    <p className="text-sm font-semibold text-slate-200">{file.name}</p>
-                    <p className="text-xs text-slate-500">{(file.size / (1024 * 1024)).toFixed(1)} MB — Click to change</p>
+                    <p className="text-xs font-semibold text-[#f0ede6]">{file.name}</p>
+                    <p className="text-[11px] font-mono text-[#787268]">{(file.size / (1024 * 1024)).toFixed(1)} MB • Click to change</p>
                   </>
                 ) : (
                   <>
-                    <div className="w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700/50 flex items-center justify-center group-hover:bg-slate-700/80 transition-colors">
-                      <svg className="w-6 h-6 text-slate-400 group-hover:text-slate-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div className="w-9 h-9 rounded-lg bg-[#1d1b19] border border-[#2b2824] flex items-center justify-center text-[#8a8377]">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                       </svg>
                     </div>
-                    <p className="text-sm font-medium text-slate-300">
-                      Drop audio file here or <span className="text-indigo-400 font-semibold">browse</span>
+                    <p className="text-xs font-medium text-[#c9c3b8]">
+                      Drop audio file here or <span className="text-[#f5f3ef] underline underline-offset-2">browse</span>
                     </p>
-                    <p className="text-xs text-slate-500">Supports MP3, WAV, M4A, FLAC • Processed locally on RTX 4050</p>
+                    <p className="text-[10px] font-mono text-[#635e57]">MP3, WAV, M4A, FLAC • Processed locally on RTX GPU</p>
                   </>
                 )}
               </div>
             </div>
 
-            {/* Transcribe action button */}
+            {/* Action button */}
             {file && !uploading && (
               <button
                 onClick={handleUpload}
                 disabled={!file || uploading}
-                className="mt-4 w-full group relative overflow-hidden rounded-xl bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 px-6 py-3.5 font-bold text-white shadow-[0_0_30px_-5px_rgba(99,102,241,0.4)] transition-all hover:shadow-[0_0_40px_-5px_rgba(99,102,241,0.6)] active:scale-[0.98] disabled:opacity-50"
+                className="mt-3 w-full rounded-lg bg-[#ded9cf] hover:bg-[#edeae4] text-[#141312] py-2.5 px-4 font-bold text-xs tracking-wide transition-colors active:scale-98 shadow-sm"
               >
-                <div className="absolute inset-0 bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                <span className="relative flex items-center justify-center gap-2.5 text-sm tracking-wide">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
-                  Start Polyphonic AI Transcription
-                </span>
+                Start Transcription
               </button>
             )}
           </div>
         )}
 
-        {/* ── Pipeline Progress Indicator ─────────────────── */}
+        {/* ── Minimalist Progress Bar ─────────────────────── */}
         {uploading && (
-          <div className="w-full max-w-2xl mb-10 animate-fadeIn">
-            <div className="backdrop-blur-xl bg-slate-900/60 rounded-2xl border border-slate-700/50 p-6 shadow-2xl">
-              {/* Stage indicators */}
-              <div className="flex items-center justify-between mb-5">
+          <div className="w-full max-w-xl mb-8 animate-fadeIn">
+            <div className="bg-[#161513] rounded-xl border border-[#2d2a27] p-5">
+              {/* Stages */}
+              <div className="flex items-center justify-between mb-4">
                 {STAGES.map((stage, i) => {
                   const isPast = currentStageIndex > i;
                   const isCurrent = currentStageIndex === i;
                   return (
-                    <div key={stage.key} className="flex items-center gap-2 flex-1">
+                    <div key={stage.key} className="flex items-center gap-1.5 flex-1">
                       <div className={`
-                        w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-500 shrink-0
-                        ${isPast ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30' :
-                          isCurrent ? 'bg-indigo-500/20 text-indigo-400 ring-1 ring-indigo-500/40 animate-pulse' :
-                            'bg-slate-800/60 text-slate-600 ring-1 ring-slate-700/30'}
+                        w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-mono font-bold transition-colors shrink-0
+                        ${isPast ? 'bg-[#292724] text-[#d6cfc2] border border-[#3e3a35]' :
+                          isCurrent ? 'bg-[#ded9cf] text-[#141312] font-black' :
+                            'bg-[#1a1917] text-[#545049] border border-[#24221f]'}
                       `}>
                         {isPast ? '✓' : i + 1}
                       </div>
-                      <span className={`text-xs font-medium hidden sm:block ${isPast ? 'text-emerald-400/80' : isCurrent ? 'text-indigo-300' : 'text-slate-600'}`}>
+                      <span className={`text-[11px] hidden sm:block ${isPast ? 'text-[#a39c91]' : isCurrent ? 'text-[#f0ede6] font-semibold' : 'text-[#4d4943]'}`}>
                         {stage.label}
                       </span>
                       {i < STAGES.length - 1 && (
-                        <div className={`flex-1 h-px mx-2 ${isPast ? 'bg-emerald-500/30' : 'bg-slate-700/40'}`} />
+                        <div className={`flex-1 h-px mx-1.5 ${isPast ? 'bg-[#3b3731]' : 'bg-[#22201d]'}`} />
                       )}
                     </div>
                   );
                 })}
               </div>
 
-              {/* Progress bar */}
-              <div className="w-full bg-slate-800/80 h-2 rounded-full overflow-hidden">
+              {/* Progress bar track */}
+              <div className="w-full bg-[#201f1c] h-1.5 rounded-full overflow-hidden">
                 <div
-                  className="bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 h-full transition-all duration-700 ease-out rounded-full relative"
+                  className="bg-[#dcd6ca] h-full transition-all duration-500 ease-out rounded-full"
                   style={{ width: `${progress}%` }}
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
-                </div>
+                />
               </div>
 
               {/* Status message */}
-              <div className="flex items-center justify-between mt-3">
-                <p className="text-xs text-slate-400 font-medium">{message}</p>
-                <span className="text-xs text-indigo-400 font-mono font-bold tabular-nums">{progress}%</span>
+              <div className="flex items-center justify-between mt-2.5">
+                <p className="text-[11px] text-[#8a8479] font-mono">{message}</p>
+                <span className="text-[11px] text-[#ded9ce] font-mono font-semibold tabular-nums">{progress}%</span>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── Active Song Studio View ─────────────────────── */}
+        {/* ── Active Studio View ──────────────────────────── */}
         {currentSong && allInstrumentKeys.length > 0 && (
           <div className="w-full animate-fadeIn">
 
-            {/* Song Title & Project Banner */}
-            <div className="w-full flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-2xl bg-gradient-to-r from-slate-900/90 to-slate-800/60 border border-slate-700/50 backdrop-blur-xl shadow-xl mb-6">
+            {/* Song Header Strip */}
+            <div className="w-full flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl bg-[#171614] border border-[#292724] mb-5">
               <div>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-400">
-                    Active Studio Project
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-[#736d64]">
+                    Active Project
                   </span>
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-[#22201d] text-[#a39d91] border border-[#2e2b27]">
                     100% Offline AI
                   </span>
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                    {Object.keys(availableStems).length} Scores Ready
+                  <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-[#22201d] text-[#8a8479] border border-[#2e2b27]">
+                    {Object.keys(availableStems).length} Scores
                   </span>
                 </div>
-                <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight flex items-center gap-2.5">
-                  <span>🎵</span>
-                  <span>{cleanSongTitle}</span>
+                <h2 className="text-xl sm:text-2xl font-bold text-[#f5f3ef] tracking-tight">
+                  {cleanSongTitle}
                 </h2>
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   onClick={() => setShowUpload(true)}
-                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-300 bg-slate-800/80 hover:bg-slate-700/80 hover:text-white border border-slate-700/50 transition-all flex items-center gap-1.5 active:scale-95"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-[#b5afa4] bg-[#201f1c] hover:bg-[#2b2925] hover:text-[#f4f1eb] border border-[#2f2c28] transition-colors flex items-center gap-1.5"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                   </svg>
-                  New Song
+                  New Track
                 </button>
               </div>
             </div>
 
             {/* Track Cards Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3.5 w-full mb-8">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 w-full mb-6">
               {allInstrumentKeys.map((instrument) => {
                 const xmlUrl = availableStems[instrument];
                 const audioUrl = availableStemsAudio[instrument];
                 const hasScore = !!xmlUrl;
                 const isActive = activeStem === instrument;
-                const colors = INSTRUMENT_COLORS[instrument] || INSTRUMENT_COLORS.other;
                 const icon = INSTRUMENT_ICONS[instrument] || '🎵';
 
                 return (
@@ -589,30 +543,25 @@ export default function Home() {
                     key={instrument}
                     onClick={() => hasScore && handleScoreView(instrument, xmlUrl)}
                     className={`
-                      group relative overflow-hidden rounded-2xl border transition-all duration-300
+                      rounded-xl border transition-all p-3.5 flex flex-col justify-between
                       ${hasScore ? 'cursor-pointer' : ''}
                       ${isActive
-                        ? `border-transparent ring-2 ${colors.ring} bg-slate-800/80 shadow-lg shadow-indigo-500/10`
-                        : 'border-slate-800/80 bg-slate-900/60 hover:bg-slate-800/50 hover:border-slate-700/80'
+                        ? 'border-[#e0d9cc] bg-[#22201d] shadow-sm'
+                        : 'border-[#262421] bg-[#161513] hover:border-[#383530] hover:bg-[#1b1a18]'
                       }
                     `}
                   >
-                    {/* Active gradient glow */}
-                    {isActive && (
-                      <div className={`absolute inset-0 bg-gradient-to-br ${colors.from} ${colors.to} opacity-[0.08] pointer-events-none`} />
-                    )}
-
-                    <div className="relative p-4 flex flex-col justify-between h-full">
-                      {/* Top row: Icon, Name & Score Action */}
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2.5">
-                          <span className="text-2xl">{icon}</span>
+                    <div>
+                      {/* Card Header */}
+                      <div className="flex items-center justify-between mb-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{icon}</span>
                           <div>
-                            <h3 className="text-sm font-bold capitalize text-slate-100 flex items-center gap-1.5">
+                            <h3 className="text-xs font-bold capitalize text-[#eeebe4]">
                               {instrument}
                             </h3>
-                            <span className="text-[10px] text-slate-500 font-medium">
-                              {hasScore ? 'Notation + Stem' : 'Percussion Audio'}
+                            <span className="text-[10px] text-[#6e6860] font-mono">
+                              {hasScore ? 'Score Ready' : 'Percussion Audio'}
                             </span>
                           </div>
                         </div>
@@ -624,53 +573,53 @@ export default function Home() {
                               handleScoreView(instrument, xmlUrl);
                             }}
                             className={`
-                              px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 active:scale-95
+                              px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors
                               ${isActive
-                                ? `bg-gradient-to-r ${colors.from} ${colors.to} text-white shadow-md`
-                                : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700/80 border border-slate-700/50'
+                                ? 'bg-[#ded9cf] text-[#141312]'
+                                : 'bg-[#22201d] text-[#999286] hover:text-[#f2efe8] hover:bg-[#2c2a26] border border-[#302d29]'
                               }
                             `}
                           >
                             {isActive ? 'Viewing' : 'Score'}
                           </button>
                         ) : (
-                          <span className="text-[10px] font-semibold text-slate-500 px-2 py-0.5 rounded-md bg-slate-800/50 border border-slate-700/40">
+                          <span className="text-[10px] font-mono text-[#66615a] px-2 py-0.5 rounded bg-[#1c1b19] border border-[#262422]">
                             Audio
                           </span>
                         )}
                       </div>
 
-                      {/* Stem Audio Player */}
+                      {/* Mini Audio Player */}
                       {audioUrl && (
-                        <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+                        <div className="mt-2" onClick={(e) => e.stopPropagation()}>
                           <audio
                             controls
                             onPlay={() => handleAudioPlay(instrument)}
                             src={getAbsoluteUrl(audioUrl)}
-                            className="w-full h-8 opacity-75 hover:opacity-100 transition-opacity"
+                            className="w-full h-7 opacity-75 hover:opacity-100 transition-opacity"
                           />
                         </div>
                       )}
-
-                      {/* Footer: Download MusicXML */}
-                      {hasScore && (
-                        <div className="mt-3 flex justify-between items-center pt-2 border-t border-slate-800/60" onClick={(e) => e.stopPropagation()}>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${colors.badge}`}>
-                            {isActive ? 'Viewing Sheet Music' : 'Click to View Score'}
-                          </span>
-                          <button
-                            onClick={() => downloadFile(getAbsoluteUrl(xmlUrl), `${cleanSongTitle}_${instrument}.musicxml`)}
-                            className="text-[11px] text-slate-500 hover:text-indigo-300 transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer"
-                            title="Download MusicXML file"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                            </svg>
-                            Export XML
-                          </button>
-                        </div>
-                      )}
                     </div>
+
+                    {/* Card Footer */}
+                    {hasScore && (
+                      <div className="mt-3 flex justify-between items-center pt-2 border-t border-[#252320]" onClick={(e) => e.stopPropagation()}>
+                        <span className="text-[10px] font-mono text-[#787268]">
+                          {isActive ? '● Currently Loaded' : 'Click to View'}
+                        </span>
+                        <button
+                          onClick={() => downloadFile(getAbsoluteUrl(xmlUrl), `${cleanSongTitle}_${instrument}.musicxml`)}
+                          className="text-[11px] font-mono text-[#8a8377] hover:text-[#e8e4dc] transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer"
+                          title="Download MusicXML file"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                          XML
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -678,38 +627,38 @@ export default function Home() {
 
             {/* ── Sheet Music Display Section ───────────────── */}
             {musicXml && activeStem && (
-              <div ref={scoreRef} className="w-full mt-2 mb-20 animate-fadeIn">
-                <div className="rounded-2xl overflow-hidden border border-slate-700/60 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] bg-slate-900/90">
+              <div ref={scoreRef} className="w-full mt-3 mb-16 animate-fadeIn">
+                <div className="rounded-xl overflow-hidden border border-[#2e2b27] bg-[#161513] shadow-lg">
                   {/* Score toolbar header */}
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between px-6 py-4 bg-slate-900/95 backdrop-blur-md border-b border-slate-700/50 gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="text-2xl">{INSTRUMENT_ICONS[activeStem] || '🎵'}</span>
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between px-5 py-3 bg-[#191816] border-b border-[#292724] gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xl">{INSTRUMENT_ICONS[activeStem] || '🎵'}</span>
                       <div>
-                        <h2 className="text-base font-bold text-white capitalize flex items-center gap-2">
+                        <h2 className="text-xs font-bold text-[#f2efe9] capitalize flex items-center gap-2">
                           <span>{activeStem}</span>
-                          <span className="text-xs font-normal text-slate-400">— Sheet Music</span>
+                          <span className="text-[11px] font-normal text-[#8a8479]">— Sheet Music</span>
                         </h2>
-                        <p className="text-xs text-slate-500">
-                          {cleanSongTitle} • Transcribed with 16th-note smart quantization
+                        <p className="text-[10px] font-mono text-[#6b665e]">
+                          {cleanSongTitle} • Quantized 16th-note notation
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex items-center gap-2">
                       <button
                         onClick={() => downloadFile(getAbsoluteUrl(availableStems[activeStem]), `${cleanSongTitle}_${activeStem}.musicxml`)}
-                        className="px-3.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm"
+                        className="px-3 py-1 rounded-md bg-[#23211e] hover:bg-[#2e2b27] text-[#ded9ce] border border-[#38342f] text-xs font-medium transition-colors flex items-center gap-1.5 shadow-xs"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                         </svg>
-                        Download MusicXML
+                        Export MusicXML
                       </button>
                     </div>
                   </div>
 
-                  {/* Score SVG container (OSMD requires white background) */}
-                  <div className="bg-white overflow-x-auto p-2">
+                  {/* Score SVG container (OSMD requires clean white background) */}
+                  <div className="bg-white overflow-x-auto p-3">
                     <ScoreDisplay xmlData={musicXml} />
                   </div>
                 </div>
@@ -721,7 +670,7 @@ export default function Home() {
 
       </div>
 
-      {/* ── History Side Panel ──────────────────────────── */}
+      {/* ── History Drawer ──────────────────────────────── */}
       <HistoryPanel
         isOpen={historyOpen}
         onClose={() => setHistoryOpen(false)}
