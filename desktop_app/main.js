@@ -62,7 +62,7 @@ function createWindow() {
 
     mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<html><body style="background:#111;color:white;display:flex;align-items:center;justify-content:center;font-family:sans-serif;height:100vh;margin:0;"><h1>Starting Audio Transcriber Servers...</h1><p style="margin-top:10px;text-align:center;">This may take a minute.</p></body></html>'));
 
-    waitOn({ resources: ['http://127.0.0.1:3000'], timeout: 60000 })
+    waitOn({ resources: ['http://127.0.0.1:3000', 'http://127.0.0.1:8000/docs'], timeout: 60000 })
         .then(() => {
             console.log("Next.js server is ready. Loading window...");
             mainWindow.loadURL('http://127.0.0.1:3000');

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import HistoryPanel from './components/HistoryPanel';
 
@@ -36,6 +36,8 @@ const STAGES = [
   { key: 'complete', label: 'Done', threshold: 100 },
 ];
 
+const API_BASE_URL = 'http://127.0.0.1:8000';
+
 export default function Home() {
   /* ── Safe download (prevents Electron navigation) ─── */
   const downloadFile = async (url: string, filename: string) => {
@@ -62,11 +64,64 @@ export default function Home() {
   const [availableStems, setAvailableStems] = useState<{ [key: string]: string }>({});
   const [availableStemsAudio, setAvailableStemsAudio] = useState<{ [key: string]: string }>({});
   const [activeStem, setActiveStem] = useState<string | null>(null);
+  const [activeAudio, setActiveAudio] = useState<string | null>(null); // New state for active audio
   const [musicXml, setMusicXml] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scoreRef = useRef<HTMLDivElement>(null);
+
+  // Helper to get correct URL for audio/XML
+  const getAbsoluteUrl = (urlPath: string) => urlPath.startsWith('http') ? urlPath : `${API_BASE_URL}${urlPath}`;
+
+  // Handle audio play to ensure only one plays at a time
+  const handleAudioPlay = (instrument: string) => {
+    setActiveAudio(instrument);
+    // Pause other audio elements if any
+    document.querySelectorAll('audio').forEach(audio => {
+      if (!audio.paused && audio.src !== getAbsoluteUrl(availableStemsAudio[instrument])) {
+        audio.pause();
+      }
+    });
+  };
+
+  // Load sheet music
+  const handleScoreView = (instrumentName: string, xmlUrl: string) => {
+    const fetchUrl = getAbsoluteUrl(xmlUrl);
+    setMessage(`Loading ${instrumentName} sheet music...`);
+
+    fetch(fetchUrl)
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to fetch XML file');
+        return res.text();
+      })
+      .then(text => {
+        setMusicXml(text);
+        setActiveStem(instrumentName);
+        setMessage(`Viewing ${instrumentName} score`);
+        // Scroll to score
+        setTimeout(() => scoreRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
+      })
+      .catch((err) => {
+        console.error("Score fetch failed", err);
+        setMessage(`Error loading ${instrumentName} score`);
+      });
+  };
+
+  // Resume connection to any active background jobs surviving an app refresh
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/active`)
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.filename && data.status === 'processing') {
+          setUploading(true);
+          setMessage(data.message || 'Reconnecting to active transcription...');
+          setProgress(data.progress || 10);
+          pollStatus(data.filename);
+        }
+      })
+      .catch(console.error);
+  }, []);
 
   /* ── File handling ─────────────────────────────────────── */
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,13 +148,14 @@ export default function Home() {
     setAvailableStems({});
     setAvailableStemsAudio({});
     setActiveStem(null);
+    setActiveAudio(null);
     setMusicXml(null);
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/upload', {
+      const response = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -117,7 +173,7 @@ export default function Home() {
   const pollStatus = async (filename: string) => {
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/status/${encodeURIComponent(filename)}?t=${Date.now()}`,
+        `${API_BASE_URL}/status/${encodeURIComponent(filename)}?t=${Date.now()}`,
         { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
       );
       if (res.ok) {
@@ -152,24 +208,8 @@ export default function Home() {
     setAvailableStems({});
     setAvailableStemsAudio({});
     setActiveStem(null);
+    setActiveAudio(null);
     setMusicXml(null);
-  };
-
-  /* ── Load sheet music ──────────────────────────────────── */
-  const loadXmlData = async (instrumentName: string, urlPath: string) => {
-    try {
-      setActiveStem(instrumentName);
-      setMessage(`Loading ${instrumentName} sheet music...`);
-      const res = await fetch(`http://127.0.0.1:8000${urlPath}`);
-      if (!res.ok) throw new Error('Failed to fetch XML file');
-      const text = await res.text();
-      setMusicXml(text);
-      setMessage(`Viewing ${instrumentName} score`);
-      // Scroll to score
-      setTimeout(() => scoreRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
-    } catch {
-      setMessage(`Error loading ${instrumentName} score`);
-    }
   };
 
   /* ── Determine current pipeline stage ──────────────────── */
@@ -421,7 +461,7 @@ export default function Home() {
                           </h3>
                         </div>
                         <button
-                          onClick={() => loadXmlData(instrument, xmlUrl)}
+                          onClick={() => handleScoreView(instrument, xmlUrl)}
                           className={`
                             px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 active:scale-95
                             ${isActive
@@ -438,7 +478,8 @@ export default function Home() {
                       {audioUrl && (
                         <audio
                           controls
-                          src={`http://127.0.0.1:8000${audioUrl}`}
+                          onPlay={() => handleAudioPlay(instrument)}
+                          src={getAbsoluteUrl(audioUrl)}
                           className="w-full h-8 opacity-70 hover:opacity-100 transition-opacity"
                         />
                       )}
@@ -448,7 +489,7 @@ export default function Home() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            downloadFile(`http://127.0.0.1:8000${xmlUrl}`, `${instrument}_score.musicxml`);
+                            downloadFile(getAbsoluteUrl(xmlUrl), `${instrument}_score.musicxml`);
                           }}
                           className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer"
                         >
@@ -506,7 +547,7 @@ export default function Home() {
           setMessage(`Loaded: ${filename.replace(/\.[^/.]+$/, '')}`);
         }}
         onViewScore={(instrumentName, xmlUrl) => {
-          loadXmlData(instrumentName, xmlUrl);
+          handleScoreView(instrumentName, xmlUrl);
         }}
         downloadFile={downloadFile}
       />

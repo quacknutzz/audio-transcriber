@@ -125,9 +125,12 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
                         return (
                             <div key={item.filename} className="rounded-xl border border-slate-700/40 bg-slate-800/30 overflow-hidden transition-all">
                                 {/* Song header row */}
-                                <button
+                                <div
+                                    role="button"
+                                    tabIndex={0}
                                     onClick={() => toggleSong(item.filename)}
-                                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-700/20 transition-colors text-left"
+                                    onKeyDown={(e) => e.key === 'Enter' && toggleSong(item.filename)}
+                                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-700/20 transition-colors text-left cursor-pointer"
                                 >
                                     <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500/20 to-fuchsia-500/20 flex items-center justify-center shrink-0">
                                         <svg className="w-4 h-4 text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -156,7 +159,7 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
                                     >
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                                     </svg>
-                                </button>
+                                </div>
 
                                 {/* Expanded instrument list */}
                                 {isExpanded && (
@@ -191,7 +194,7 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
 
                                                     {/* Download */}
                                                     <button
-                                                        onClick={() => downloadFile(`http://127.0.0.1:8000${xmlUrl}`, `${instrument}_score.musicxml`)}
+                                                        onClick={() => downloadFile(xmlUrl.startsWith('http') ? xmlUrl : `http://127.0.0.1:8000${xmlUrl}`, `${instrument}_score.musicxml`)}
                                                         className="px-2 py-1 text-[10px] font-semibold text-slate-500 hover:text-slate-300 bg-slate-800/40 hover:bg-slate-700/40 rounded-md transition-all"
                                                     >
                                                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -213,7 +216,7 @@ export default function HistoryPanel({ isOpen, onClose, onLoadSong, onViewScore,
                                                         </div>
                                                         <audio
                                                             controls
-                                                            src={`http://127.0.0.1:8000${stemUrl}`}
+                                                            src={stemUrl.startsWith('http') ? stemUrl : `http://127.0.0.1:8000${stemUrl}`}
                                                             className="w-full h-7 opacity-60 hover:opacity-100 transition-opacity"
                                                         />
                                                     </div>

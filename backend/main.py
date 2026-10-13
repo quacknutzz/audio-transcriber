@@ -1,23 +1,26 @@
+import os
+import gc
+import json
+import time
+import shutil
+import logging
+from pathlib import Path
+
+import torch
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import shutil
-import os
-import asyncio
-import json
-from pathlib import Path
+
 from services.separation import SeparationService
 from services.transcription import TranscriptionService
 from services.music_processing import MusicProcessingService
-from services.gcs_service import GCSService
 
-app = FastAPI(title="Audio Transcriber API")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("ghostnote")
 
-# In-memory dictionary to track processing status
-# Keys are filenames, values are dicts with 'status', 'progress', 'message', and 'results'
-job_status = {}
+app = FastAPI(title="GhostNote Local API")
 
-# CORS for frontend
+# CORS for local frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -26,54 +29,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = Path("uploads")
-OUTPUT_DIR = Path("processed")
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+OUTPUT_DIR = BASE_DIR / "processed"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+(OUTPUT_DIR / "stems").mkdir(exist_ok=True)
+(OUTPUT_DIR / "midi").mkdir(exist_ok=True)
+(OUTPUT_DIR / "xml").mkdir(exist_ok=True)
+
 STATE_FILE = OUTPUT_DIR / "state.json"
 
 separation_service = SeparationService(OUTPUT_DIR / "stems")
 transcription_service = TranscriptionService(OUTPUT_DIR / "midi")
 music_processing_service = MusicProcessingService(OUTPUT_DIR / "xml")
 
-# Initialize robust Google Cloud Storage service securely using JSON key
-gcs_service = GCSService(bucket_name="ghostnote-storage", credentials_path="gcs-key.json")
+# In-memory status tracker
+job_status = {}
 
-def save_state():
-    """Takes a rigid snapshot of the UI history memory and saves it to disk."""
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(job_status, f)
-    except Exception as e:
-        print(f"Failed to save state.json: {e}")
-
-# Mount the XML directory statically so the frontend can read the generated files
+# Mount static folders so Next.js / Electron can stream audio stems & read sheet music XML
 app.mount("/xml", StaticFiles(directory=str(OUTPUT_DIR / "xml")), name="xml")
 app.mount("/stems", StaticFiles(directory=str(OUTPUT_DIR / "stems")), name="stems")
 
-@app.get("/")
-def read_root():
-    return {"message": "Audio Transcriber API is running"}
+def save_state():
+    """Snapshots completed jobs to state.json so history survives app restarts."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(job_status, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save state.json: {e}")
 
 @app.on_event("startup")
 def load_existing_jobs():
-    """
-    On server boot, load the rigid state.json file to perfectly restore the UI history.
-    """
+    """Restores previous completed jobs on app launch."""
     global job_status
     if STATE_FILE.exists():
         try:
-            with open(STATE_FILE, "r") as f:
-                saved_status = json.load(f)
-                # Only load fully completed jobs so broken/processing ones from a crash don't get stuck
-                completed_jobs = {k: v for k, v in saved_status.items() if v.get("status") == "completed"}
-                job_status.update(completed_jobs)
-            print(f"Loaded {len(completed_jobs)} previous jobs from state.json perfectly.")
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                completed = {k: v for k, v in saved.items() if v.get("status") == "completed"}
+                job_status.update(completed)
+            logger.info(f"Restored {len(completed)} completed transcription jobs from history.")
         except Exception as e:
-            print(f"Failed to load state.json: {e}")
+            logger.error(f"Failed to read state.json: {e}")
 
-def is_silent(audio_path: Path, threshold: float = 0.01) -> bool:
-    """Check if an audio file is essentially silent by reading peak amplitude."""
+def is_silent(audio_path: Path, threshold: float = 0.005) -> bool:
+    """Checks whether an isolated stem is silent to avoid wasting compute."""
     try:
         import soundfile as sf
         import numpy as np
@@ -81,148 +82,134 @@ def is_silent(audio_path: Path, threshold: float = 0.01) -> bool:
         peak = float(np.max(np.abs(data)))
         return peak < threshold
     except Exception:
-        return False  # If we can't read it, assume it has content
+        return False
+
+def free_gpu_memory():
+    """Purges PyTorch CUDA cache and collects Python garbage."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 async def process_audio_task(file_path: Path, filename: str):
     """
-    Background task to handle the heavy lifting of separation and transcription.
+    100% local, VRAM-safe sequential pipeline:
+    1. Demucs 6-stem separation (subprocess isolation guarantees full VRAM release)
+    2. Silence check
+    3. Specialized sequential transcription (Piano -> Vocals -> Bass -> Guitar/Other -> Drums)
+    4. Music21 notation quantization and MusicXML export
+    5. Local state persistence
     """
-    import time
     start_time = time.time()
+    project_name = file_path.stem
+    logger.info(f"Starting local processing pipeline for: {filename}")
     
     try:
-        job_status[filename] = {"status": "processing", "progress": 10, "message": "Separating stems..."}
-        # 1. Separation
-        print(f"Separating {filename}...")
+        # 1. Stem Separation
+        job_status[filename] = {
+            "status": "processing",
+            "progress": 10,
+            "message": "Separating stems with Demucs (Vocals, Drums, Bass, Guitar, Piano, Other)..."
+        }
+        
         stems = await separation_service.separate_audio(file_path)
-        print(f"Separation complete. Stems: {stems.keys()}")
-        job_status[filename] = {"status": "processing", "progress": 50, "message": "Transcribing instruments..."}
+        free_gpu_memory()
+        
+        if not stems:
+            raise RuntimeError("Demucs failed to isolate any stems.")
 
-        # 2. Transcription (with silence detection and smart routing)
-        results = {}
-        project_name = file_path.stem
-        
-        # ── Multiprocessing: dispatch MT3 stems to 2 parallel OS processes ──
-        from concurrent.futures import ProcessPoolExecutor
-        from services.mt3_worker import transcribe_stem
-        import asyncio
-        
-        loop = asyncio.get_event_loop()
-        midi_output_dir = OUTPUT_DIR / "midi"
-        midi_output_dir.mkdir(parents=True, exist_ok=True)
+        # 2. Identify active (non-silent) stems
+        active_stems = {}
+        for inst, p in stems.items():
+            if not is_silent(p):
+                active_stems[inst] = p
+            else:
+                logger.info(f"Stem '{inst}' is silent, skipping transcription.")
 
-        # Collect MT3 stems (non-vocals, non-silent)
-        mt3_jobs = []  # (stem_key, instrument_name, stem_path, midi_output_path)
-        vocal_job = None  # vocals go through Basic Pitch in the main process
+        # Stems to transcribe into sheet music
+        transcribe_order = ["piano", "vocals", "bass", "guitar", "other"]
+        pending_instruments = [inst for inst in transcribe_order if inst in active_stems]
         
-        for stem_key, instrument_name in [("bass", "bass"), ("guitar", "guitar"), ("other", "other"), ("piano", "piano")]:
-            if stem_key in stems:
-                stem_path = stems[stem_key]
-                if is_silent(stem_path):
-                    print(f"Skipping {stem_key}: silent stem detected.")
-                    continue
-                midi_out = str(midi_output_dir / f"{project_name}_{stem_key}_mt3.mid")
-                mt3_jobs.append((stem_key, instrument_name, str(stem_path), midi_out))
-        
-        # Handle keys->piano alias
-        if "keys" in stems and "piano" not in stems:
-            stem_path = stems["keys"]
-            if not is_silent(stem_path):
-                midi_out = str(midi_output_dir / f"{project_name}_keys_mt3.mid")
-                mt3_jobs.append(("keys", "piano", str(stem_path), midi_out))
-        
-        # Check for vocals
-        if "vocals" in stems and not is_silent(stems["vocals"]):
-            vocal_job = ("vocals", "vocals")
-        
-        # Dispatch MT3 jobs to a single GPU worker process to prevent VRAM thrashing
-        print(f"Dispatching {len(mt3_jobs)} MT3 jobs...")
-        job_status[filename] = {"status": "processing", "progress": 55, "message": f"Transcribing {len(mt3_jobs)} instruments..."}
-        
-        mt3_futures = {}
-        with ProcessPoolExecutor(max_workers=1) as pool:
-            for stem_key, (future, instrument_name) in mt3_futures.items():
-                try:
-                    midi_path_str = await future
-                    if midi_path_str:  # non-empty means success
-                        midi_path = Path(midi_path_str)
-                        xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
-                        results[stem_key] = xml_path
-                        print(f"✓ {stem_key} transcription complete.")
-                    else:
-                        # MT3 failed in the worker — fall back to Basic Pitch in main process
-                        print(f"MT3 worker failed for {stem_key}, falling back to Basic Pitch...")
-                        midi_path = await transcription_service._transcribe_basic_pitch(
-                            stems[stem_key], f"{project_name}_{stem_key}", instrument_name
-                        )
-                        xml_path = music_processing_service.midi_to_xml(midi_path, f"{project_name}_{stem_key}", audio_ref_path=file_path)
-                        results[stem_key] = xml_path
-                except Exception as e:
-                    print(f"Worker error for {stem_key}: {e}")
-        
-        print(f"All transcription complete. {len(results)} instruments processed.")
-
-        # Drums: audio stem is served for playback, but NO sheet music is generated
-            
-        # Formulate web-accessible Google Cloud Storage paths
-        # Instead of static URLs, we save the raw object path to memory
         results_urls = {}
         stems_urls = {}
+        
+        # Populate stem audio URLs for audio playback in the UI
+        for inst, p in stems.items():
+            try:
+                rel = Path(p).relative_to(OUTPUT_DIR / "stems")
+                stems_urls[inst] = f"/stems/{rel.as_posix()}"
+            except Exception:
+                pass
 
-        # Upload XMLs to Google Cloud
-        for instrument, local_path in results.items():
-            gcs_blob = f"results/{project_name}/{instrument}.musicxml"
-            if gcs_service.client:
-                gcs_service.upload_file(local_path, gcs_blob)
-                results_urls[instrument] = gcs_blob
-            else:
-                # Fallback to local server if GCS fails
-                results_urls[instrument] = f"/xml/{Path(local_path).name}"
-
-        # Upload Stems to Google Cloud
-        for instrument in stems:
-            gcs_blob = f"stems/{project_name}/{instrument}.wav"
-            if gcs_service.client:
-                gcs_service.upload_file(stems[instrument], gcs_blob)
-                stems_urls[instrument] = gcs_blob
-            else:
-                # Fallback to local server
-                try:
-                    rel_path = Path(stems[instrument]).relative_to(OUTPUT_DIR / "stems")
-                    stems_urls[instrument] = f"/stems/{rel_path.as_posix()}"
-                except ValueError:
-                    pass
-
-        # Also upload/serve drum audio for playback (no sheet music)
-        if "drums" in stems and "drums" not in stems_urls:
-            gcs_blob = f"stems/{project_name}/drums.wav"
-            if gcs_service.client:
-                gcs_service.upload_file(stems["drums"], gcs_blob)
-                stems_urls["drums"] = gcs_blob
-            else:
-                try:
-                    rel_path = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
-                    stems_urls["drums"] = f"/stems/{rel_path.as_posix()}"
-                except ValueError:
-                    pass
+        total_inst = len(pending_instruments)
+        
+        # 3. Sequential transcription (Strictly one instrument at a time to stay under 3GB VRAM)
+        for idx, inst in enumerate(pending_instruments):
+            progress_val = int(25 + ((idx / max(total_inst, 1)) * 65))
+            job_status[filename] = {
+                "status": "processing",
+                "progress": progress_val,
+                "message": f"Transcribing {inst.capitalize()} ({idx + 1}/{total_inst})..."
+            }
+            logger.info(f"Transcribing stem: {inst}")
             
+            stem_audio_path = active_stems[inst]
+            output_name = f"{project_name}_{inst}"
+            
+            # Specialized transcription
+            midi_path = await transcription_service.transcribe_instrument(
+                stem_audio_path, output_name, instrument_name=inst
+            )
+            free_gpu_memory()
+            
+            # MusicXML conversion
+            if midi_path and midi_path.exists():
+                try:
+                    xml_path = music_processing_service.midi_to_xml(
+                        midi_path, output_name, audio_ref_path=file_path
+                    )
+                    results_urls[inst] = f"/xml/{xml_path.name}"
+                    logger.info(f"Successfully generated sheet music for {inst}: {xml_path.name}")
+                except Exception as xml_err:
+                    logger.error(f"MusicXML generation failed for {inst}: {xml_err}")
+
+        # Drums: Include audio stem for playback. (If drum notation was desired, unpitched transcription can be enabled)
+        if "drums" in stems and "drums" not in stems_urls:
+            try:
+                rel = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
+                stems_urls["drums"] = f"/stems/{rel.as_posix()}"
+            except Exception:
+                pass
+
         elapsed = time.time() - start_time
         m, s = divmod(int(elapsed), 60)
         time_str = f"{m}m {s}s" if m > 0 else f"{s}s"
 
-        print(f"Processing complete for {filename}. Results: {results_urls}")
         job_status[filename] = {
-            "status": "completed", 
-            "progress": 100, 
-            "message": f"Total process completed in {time_str}",
+            "status": "completed",
+            "progress": 100,
+            "message": f"Transcription completed in {time_str}!",
             "results": results_urls,
             "stems": stems_urls
         }
-        save_state()  # Snapshot UI state to disk so it survives app restarts
-        
+        save_state()
+        logger.info(f"Completed job {filename} in {time_str}. {len(results_urls)} scores created.")
+
     except Exception as e:
-        print(f"Error processing {filename}: {e}")
-        job_status[filename] = {"status": "error", "progress": 0, "message": str(e)}
+        logger.error(f"Processing failed for {filename}: {e}", exc_info=True)
+        job_status[filename] = {
+            "status": "error",
+            "progress": 0,
+            "message": str(e)
+        }
+
+@app.get("/")
+def read_root():
+    gpu_info = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU Mode"
+    return {
+        "status": "online",
+        "service": "GhostNote Local AI API",
+        "hardware": gpu_info
+    }
 
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
@@ -233,104 +220,88 @@ async def upload_audio(file: UploadFile = File(...), background_tasks: Backgroun
         filename = file.filename
         file_path = UPLOAD_DIR / filename
         
-        # Always treat as a new upload and process from scratch
+        # Save raw audio locally
         contents = await file.read()
         with open(file_path, "wb") as f:
             f.write(contents)
-        
-        # Initialize job status
-        job_status[filename] = {"status": "processing", "progress": 0, "message": "Queued for processing..."}
+            
+        logger.info(f"Received upload: {filename} ({len(contents)} bytes)")
 
-        # Offload processing to background task
+        # Initial tracking state
+        job_status[filename] = {
+            "status": "processing",
+            "progress": 5,
+            "message": "Audio loaded. Starting local pipeline..."
+        }
+
+        # Dispatch background processing task on the local machine
         background_tasks.add_task(process_audio_task, file_path, filename)
-        
-        return {"filename": file.filename, "message": "File uploaded successfully. Processing started in background."}
+
+        return {"filename": filename, "message": "Uploaded successfully. Processing locally in background."}
+
     except Exception as e:
+        logger.error(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/history")
-async def get_history():
-    history = []
-    for filename, status_data in job_status.items():
-        if status_data.get("status") == "completed":
-            item = {
-                "filename": filename,
-                "message": status_data.get("message"),
-                "results": status_data.get("results"),
-                "stems": status_data.get("stems")
-            }
-            # Dynamically convert raw GCS blobs to secure 2-hour Signed URLs for the React UI!
-            if gcs_service.client:
-                signed_results = {inst: gcs_service.generate_signed_url(blob) for inst, blob in item["results"].items() if not str(blob).startswith("/xml")}
-                signed_stems = {inst: gcs_service.generate_signed_url(blob) for inst, blob in item["stems"].items() if not str(blob).startswith("/stems")}
-                
-                # Merge signed URLs with any local fallback URLs
-                item["results"] = {**item["results"], **signed_results}
-                item["stems"] = {**item["stems"], **signed_stems}
-
-            history.append(item)
-    return history
-
-@app.delete("/history/{filename}")
-async def delete_history_item(filename: str):
-    """Deeply clear a job from RAM memory and physically delete all its generated XMLs/stems off the SSD."""
-    project_name = Path(filename).stem
-    
-    # Sweep ALL virtual extensions from job_status memory
-    deleted_any = False
-    keys_to_delete = [k for k in job_status.keys() if Path(k).stem == project_name]
-    for k in keys_to_delete:
-        del job_status[k]
-        deleted_any = True
-        
-    if not deleted_any:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    # 1. Delete original upload
-    orig_file = UPLOAD_DIR / filename
-    if orig_file.exists():
-        orig_file.unlink()
-        
-    # 2. Delete generated XMLs and MIDIs
-    for ext, folder in [(".musicxml", "xml"), (".mid", "midi")]:
-        for filepath in (OUTPUT_DIR / folder).glob(f"{project_name}_*{ext}"):
-            filepath.unlink()
-            
-    # 3. Delete heavy Demucs stem folder structure locally
-    stem_dir = OUTPUT_DIR / "stems" / project_name
-    if stem_dir.exists():
-        shutil.rmtree(stem_dir)
-        
-    # 4. Delete the files remotely from Google Cloud Storage so they don't accrue orphan costs
-    if gcs_service.client:
-        gcs_service.delete_directory(f"results/{project_name}/")
-        gcs_service.delete_directory(f"stems/{project_name}/")
-        
-    if deleted_any:
-        save_state()  # Re-snapshot state.json so it stays dead on next boot
-        
-    return {"status": "success", "message": f"Deleted {filename} entirely."}
+@app.get("/active")
+async def get_active_job():
+    """Returns any currently processing task so the UI reconnects on page refresh."""
+    for filename, data in job_status.items():
+        if data.get("status") == "processing":
+            return {"filename": filename, **data}
+    return None
 
 @app.get("/status/{filename}")
 async def get_status(filename: str):
     status = job_status.get(filename)
     if not status:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    status_data = dict(job_status[filename])
-    
-    # If completed, inject dynamic Signed URLs for React frontend to download/play
-    if status_data.get("status") == "completed" and gcs_service.client:
-        results = status_data.get("results", {})
-        stems = status_data.get("stems", {})
-        
-        signed_results = {inst: gcs_service.generate_signed_url(blob) for inst, blob in results.items() if not str(blob).startswith("/xml")}
-        signed_stems = {inst: gcs_service.generate_signed_url(blob) for inst, blob in stems.items() if not str(blob).startswith("/stems")}
-        
-        status_data["results"] = {**results, **signed_results}
-        status_data["stems"] = {**stems, **signed_stems}
+    return status
 
-    return status_data
+@app.get("/history")
+async def get_history():
+    """Returns all historical completed songs for the side panel."""
+    history = []
+    for filename, status_data in job_status.items():
+        if status_data.get("status") == "completed":
+            history.append({
+                "filename": filename,
+                "results": status_data.get("results", {}),
+                "stems": status_data.get("stems", {}),
+                "message": status_data.get("message", "")
+            })
+    return history
+
+@app.delete("/history/{filename}")
+async def delete_history_item(filename: str):
+    """Deletes the job from history and purges generated stems and sheet music from disk."""
+    project_name = Path(filename).stem
+    
+    if filename in job_status:
+        del job_status[filename]
+        
+    # Also remove any keys sharing the same project stem
+    for k in list(job_status.keys()):
+        if Path(k).stem == project_name:
+            del job_status[k]
+
+    # Delete original upload
+    orig_file = UPLOAD_DIR / filename
+    if orig_file.exists():
+        orig_file.unlink(missing_ok=True)
+
+    # Delete XMLs and MIDIs
+    for folder, ext in [("xml", ".musicxml"), ("midi", ".mid")]:
+        for f in (OUTPUT_DIR / folder).glob(f"{project_name}_*{ext}"):
+            f.unlink(missing_ok=True)
+
+    # Delete stem folder
+    stem_dir = OUTPUT_DIR / "stems" / project_name
+    if stem_dir.exists():
+        shutil.rmtree(stem_dir, ignore_errors=True)
+
+    save_state()
+    return {"status": "success", "message": f"Deleted {filename} and all generated assets."}
 
 if __name__ == "__main__":
     import uvicorn
