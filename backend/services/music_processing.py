@@ -46,14 +46,16 @@ class MusicProcessingService:
             self.logger.warning(f"Attribute detection failed: {e}")
             return 120.0, "C"
 
-    def midi_to_xml(self, midi_path: Path, output_name: str, audio_ref_path: Path = None, drum_ref_path: Path = None) -> Path:
+    def midi_to_xml(self, midi_path: Path, output_name: str, audio_ref_path: Path = None, drum_ref_path: Path = None, master_key_sig=None) -> Path:
         """
         Converts a MIDI file to clean, professionally formatted MusicXML:
-        - Detects song key using Krumhansl-Schmuckler harmonic analysis on transcribed notes.
-        - Injects proper key signature to eliminate redundant sharp and natural accidentals.
-        - Enforces measure-level accidental deduplication.
-        - Groups polyphonic notes into coherent chords rather than slicing.
-        - Preserves pure monophonic melody lines for vocals and bass.
+        - Applies acoustic physics and musicology rules per instrument:
+          * Guitar: 55ms strum consolidation, harmonic overtone sieve, +12 semitone 8vb written transposition.
+          * Bass: Pluck attack-sustain octave merger, register normalization, +12 semitone 8vb written transposition.
+          * Vocals: Monophonic pitch-continuity smoothing, zero transposition.
+          * Other: Polyphonic chord sieving and overtone de-cluttering.
+        - Harmonizes key signature across all stems with the master song key.
+        - Mathematical invariant 4.0-beat measure containers with tie suppression and clean rest alignment.
         """
         import re
         import pretty_midi
@@ -68,8 +70,11 @@ class MusicProcessingService:
                 tempo_bpm, key_tonic = self.detect_attributes(audio_ref_path, drum_ref_path)
 
             name_lower = output_name.lower()
-            is_mono = any(m in name_lower for m in ["vocal", "voice", "bass"])
+            is_vocal = any(m in name_lower for m in ["vocal", "voice"])
+            is_bass = "bass" in name_lower
+            is_guitar = "guitar" in name_lower
             is_drum = any(d in name_lower for d in ["drums", "drum", "percussion"])
+            is_mono = is_vocal or is_bass
 
             # 2. Parse MIDI with PrettyMIDI
             pm = pretty_midi.PrettyMIDI(str(midi_path))
@@ -81,13 +86,80 @@ class MusicProcessingService:
             # Filter out microscopic velocity/transient noise
             clean_notes = [
                 n for n in inst.notes
-                if not (n.end - n.start < 0.08 and n.velocity < 45)
+                if not (n.end - n.start < 0.08 and n.velocity < 40)
             ]
 
-            # 3. Cluster notes into coherent musical events
+            # 3. Instrument-Aware Musicology & Physics Processing
             events = []
-            if is_mono:
-                # Strictly sequential monophonic melody
+
+            if is_bass:
+                # Bass: Monophonic pluck attack/decay merger & octave-jump continuity filter
+                sorted_notes = sorted(clean_notes, key=lambda x: x.start)
+                merged_bass = []
+                for n in sorted_notes:
+                    if not merged_bass:
+                        merged_bass.append({"start": n.start, "end": n.end, "pitch": n.pitch, "vel": n.velocity})
+                        continue
+                    prev = merged_bass[-1]
+                    # If consecutive note is an overtone jump (+/- 12 semitones) within 0.15s, merge attack into decay
+                    is_octave_flip = abs(n.pitch - prev["pitch"]) in [11, 12, 13]
+                    is_close = (n.start - prev["end"]) <= 0.15
+                    if is_octave_flip and is_close:
+                        prev["end"] = max(prev["end"], n.end)
+                        norm_p = prev["pitch"]
+                        while norm_p < 36: norm_p += 12
+                        while norm_p > 48: norm_p -= 12
+                        prev["pitch"] = norm_p
+                    elif n.start < prev["end"]:
+                        if n.start > prev["start"] + 0.1:
+                            prev["end"] = n.start
+                            merged_bass.append({"start": n.start, "end": n.end, "pitch": n.pitch, "vel": n.velocity})
+                    else:
+                        norm_p = n.pitch
+                        while norm_p < 36: norm_p += 12
+                        while norm_p > 48: norm_p -= 12
+                        merged_bass.append({"start": n.start, "end": n.end, "pitch": norm_p, "vel": n.velocity})
+
+                # Standard bass clef transposition (+12 semitones into written pitch, 8vb standard)
+                for b in merged_bass:
+                    events.append({
+                        "start": b["start"],
+                        "end": b["end"],
+                        "pitches": [b["pitch"] + 12]
+                    })
+
+            elif is_guitar:
+                # Guitar: 55ms strum consolidation + harmonic overtone sieve + +12 written transposition
+                sorted_notes = sorted(clean_notes, key=lambda x: x.start)
+                chords = []
+                for n in sorted_notes:
+                    if n.velocity < 40 and (n.end - n.start) < 0.1:
+                        continue  # discard transient string scrapes
+                    if not chords or (n.start - chords[-1]["start"] > 0.055):
+                        chords.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
+                    else:
+                        chords[-1]["pitches"].append(n.pitch)
+                        chords[-1]["end"] = max(chords[-1]["end"], n.end)
+
+                for c in chords:
+                    # Transpose +12 into standard guitar written pitch (8vb treble clef)
+                    transposed = [p + 12 for p in c["pitches"]]
+                    # Harmonic sieve: deduplicate pitch classes, allow at most 1 octave doubling
+                    seen_pcs = {}
+                    filtered = []
+                    for p in sorted(transposed):
+                        pc = p % 12
+                        seen_pcs[pc] = seen_pcs.get(pc, 0) + 1
+                        if seen_pcs[pc] <= 1:
+                            filtered.append(p)
+                    # Polyphony clamping: max 4 voices for humanly playable guitar chords
+                    if len(filtered) > 4:
+                        filtered = [filtered[0]] + filtered[-3:]
+                    if filtered:
+                        events.append({"start": c["start"], "end": c["end"], "pitches": filtered})
+
+            elif is_vocal:
+                # Strictly sequential monophonic vocal melody
                 sorted_notes = sorted(clean_notes, key=lambda x: x.start)
                 for n in sorted_notes:
                     if not events:
@@ -98,26 +170,49 @@ class MusicProcessingService:
                             prev["end"] = max(prev["start"] + 0.05, n.start)
                         if n.start >= prev["end"]:
                             events.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
-            else:
-                # Polyphonic chord clustering: group notes starting within 70ms into unified chords
-                for n in sorted(clean_notes, key=lambda x: x.start):
-                    if not events or (n.start - events[-1]["start"] > 0.07):
-                        events.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
-                    else:
-                        events[-1]["pitches"].append(n.pitch)
-                        events[-1]["end"] = max(events[-1]["end"], n.end)
 
-            # 4. Determine harmonic key signature from transcribed notes (Krumhansl-Schmuckler)
-            detected_key = None
-            try:
-                temp_stream = music21.stream.Stream()
-                for n in clean_notes:
-                    temp_stream.append(music21.note.Note(n.pitch))
-                if len(temp_stream.notes) >= 3:
-                    detected_key = temp_stream.analyze('key')
-                    self.logger.info(f"Music21 K-S Key for {output_name}: {detected_key} (sharps={detected_key.sharps})")
-            except Exception as k_err:
-                self.logger.warning(f"Key analysis fallback: {k_err}")
+            else:
+                # Other / Synths / Strings: polyphonic clustering with overtone sieving
+                sorted_notes = sorted(clean_notes, key=lambda x: x.start)
+                chords = []
+                for n in sorted_notes:
+                    if n.velocity < 42:
+                        continue
+                    if not chords or (n.start - chords[-1]["start"] > 0.06):
+                        chords.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
+                    else:
+                        chords[-1]["pitches"].append(n.pitch)
+                        chords[-1]["end"] = max(chords[-1]["end"], n.end)
+
+                for c in chords:
+                    seen_pcs = {}
+                    filtered = []
+                    for p in sorted(c["pitches"]):
+                        pc = p % 12
+                        seen_pcs[pc] = seen_pcs.get(pc, 0) + 1
+                        if seen_pcs[pc] <= 1:
+                            filtered.append(p)
+                    if len(filtered) > 4:
+                        filtered = [filtered[0]] + filtered[-3:]
+                    if filtered:
+                        events.append({"start": c["start"], "end": c["end"], "pitches": filtered})
+
+            # 4. Harmonized Song Key Signature
+            detected_key = master_key_sig
+            if not detected_key:
+                if is_bass:
+                    detected_key = music21.key.Key(key_tonic)
+                else:
+                    try:
+                        temp_stream = music21.stream.Stream()
+                        for ev in events:
+                            for p in ev["pitches"]:
+                                temp_stream.append(music21.note.Note(p))
+                        if len(temp_stream.notes) >= 3:
+                            detected_key = temp_stream.analyze('key')
+                            self.logger.info(f"Music21 K-S Key for {output_name}: {detected_key} (sharps={detected_key.sharps})")
+                    except Exception as k_err:
+                        self.logger.warning(f"Key analysis fallback: {k_err}")
 
             if not detected_key:
                 detected_key = music21.key.Key(key_tonic)

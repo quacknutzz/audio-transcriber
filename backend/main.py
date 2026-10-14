@@ -143,6 +143,7 @@ async def process_audio_task(file_path: Path, filename: str):
         total_inst = len(pending_instruments)
         
         # 3. Sequential transcription (Strictly one instrument at a time to stay under 3GB VRAM)
+        master_key_sig = None
         for idx, inst in enumerate(pending_instruments):
             progress_val = int(25 + ((idx / max(total_inst, 1)) * 65))
             job_status[filename] = {
@@ -166,10 +167,21 @@ async def process_audio_task(file_path: Path, filename: str):
                 try:
                     drum_path = stems.get("drums")
                     xml_path = music_processing_service.midi_to_xml(
-                        midi_path, output_name, audio_ref_path=file_path, drum_ref_path=drum_path
+                        midi_path, output_name, audio_ref_path=file_path, drum_ref_path=drum_path,
+                        master_key_sig=master_key_sig
                     )
                     results_urls[inst] = f"/xml/{xml_path.name}"
                     logger.info(f"Successfully generated sheet music for {inst}: {xml_path.name}")
+                    
+                    if master_key_sig is None:
+                        try:
+                            score = music21.converter.parse(str(xml_path))
+                            ks = score.recurse().getElementsByClass(music21.key.KeySignature)
+                            if ks:
+                                master_key_sig = ks.first()
+                                logger.info(f"Harmonized master key signature for song: {master_key_sig}")
+                        except Exception as k_err:
+                            logger.warning(f"Could not extract master key: {k_err}")
                 except Exception as xml_err:
                     logger.error(f"MusicXML generation failed for {inst}: {xml_err}")
 
