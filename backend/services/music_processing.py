@@ -1,5 +1,7 @@
 from pathlib import Path
+import math
 import logging
+import numpy as np
 import music21
 
 class MusicProcessingService:
@@ -120,78 +122,143 @@ class MusicProcessingService:
             if not detected_key:
                 detected_key = music21.key.Key(key_tonic)
 
-            # Construct music21 Part
+            # 5. Professional Rhythmic Quantization & Metric Beat Alignment
+            beat_sec = 60.0 / max(tempo_bpm, 40.0)
+            
+            # Use 8th-note grid (0.5 beat) as standard musical subdivision for clean notation,
+            # allowing 16th-note (0.25) only for fast runs (< 0.28s)
+            quantized = []
+            for ev in events:
+                raw_dur = (ev["end"] - ev["start"]) / beat_sec
+                raw_start = ev["start"] / beat_sec
+                g = 0.25 if raw_dur < 0.28 else 0.5
+                q_start = round(raw_start / g) * g
+                q_dur = max(g, round(raw_dur / g) * g)
+                quantized.append({"start": q_start, "dur": q_dur, "pitches": ev["pitches"]})
+
+            # Prevent overlaps and connect small legato gaps (breath pauses <= 0.35 beat) in monophonic lines
+            for idx in range(len(quantized) - 1):
+                curr = quantized[idx]
+                nxt = quantized[idx + 1]
+                if curr["start"] + curr["dur"] > nxt["start"]:
+                    curr["dur"] = max(0.25, nxt["start"] - curr["start"])
+                gap = nxt["start"] - (curr["start"] + curr["dur"])
+                if is_mono and 0.0 < gap <= 0.35:
+                    curr["dur"] += gap
+
+            max_q = max((ev["start"] + ev["dur"] for ev in quantized), default=4.0)
+            total_measures = max(1, int(np.ceil(max_q / 4.0)))
+
+            # Distribute notes into mathematically exact 4-beat measures
+            measure_events = {m: [] for m in range(1, total_measures + 1)}
+
+            for ev in quantized:
+                q_s = ev["start"]
+                q_d = ev["dur"]
+                p = ev["pitches"]
+                m_idx = int(q_s // 4.0) + 1
+                offset_in_m = q_s % 4.0
+                spill = (offset_in_m + q_d) - 4.0
+
+                # Tie suppression policy:
+                # If spillover across the barline is <= 0.5 beats (short tail/reverb bleed),
+                # truncate cleanly to the barline rather than creating an unwanted tie!
+                if spill <= 0.5:
+                    dur_in_m = min(q_d, 4.0 - offset_in_m)
+                    measure_events[m_idx].append({
+                        "offset": offset_in_m,
+                        "dur": dur_in_m,
+                        "pitches": p,
+                        "tie": None
+                    })
+                else:
+                    # Genuinely sustained phrase held across barline -> split into tied notes
+                    dur_m1 = 4.0 - offset_in_m
+                    dur_m2 = round(spill / 0.5) * 0.5
+                    measure_events[m_idx].append({
+                        "offset": offset_in_m,
+                        "dur": dur_m1,
+                        "pitches": p,
+                        "tie": "start"
+                    })
+                    if m_idx + 1 <= total_measures and dur_m2 > 0:
+                        measure_events[m_idx + 1].append({
+                            "offset": 0.0,
+                            "dur": dur_m2,
+                            "pitches": p,
+                            "tie": "stop"
+                        })
+
+            # Construct music21 Part with explicit Measure objects
             new_part = music21.stream.Part()
             new_part.id = 'P1'
             new_part.partName = ''
 
-            # Key, Tempo, Time Signature
-            new_part.insert(0, detected_key)
-            new_part.insert(0, music21.tempo.MetronomeMark(number=round(tempo_bpm)))
-            new_part.insert(0, music21.meter.TimeSignature('4/4'))
-
+            # Clef selection
             if "bass" in name_lower:
-                new_part.insert(0, music21.clef.BassClef())
-                new_part.insert(0, music21.instrument.ElectricBass())
+                part_clef = music21.clef.BassClef()
             elif is_drum:
-                new_part.insert(0, music21.clef.PercussionClef())
-                new_part.insert(0, music21.instrument.Percussion())
+                part_clef = music21.clef.PercussionClef()
             else:
-                new_part.insert(0, music21.clef.TrebleClef())
-                if "vocal" in name_lower or "voice" in name_lower:
-                    new_part.insert(0, music21.instrument.Vocalist())
-                elif "guitar" in name_lower:
-                    new_part.insert(0, music21.instrument.ElectricGuitar())
+                part_clef = music21.clef.TrebleClef()
+
+            time_sig = music21.meter.TimeSignature('4/4')
+            tempo_mark = music21.tempo.MetronomeMark(number=round(tempo_bpm))
+
+            # Build each 4.0-beat Measure explicitly
+            for m_num in range(1, total_measures + 1):
+                m = music21.stream.Measure(number=m_num)
+                
+                if m_num == 1:
+                    m.insert(0, part_clef)
+                    m.insert(0, detected_key)
+                    m.insert(0, time_sig)
+                    m.insert(0, tempo_mark)
+
+                evs = sorted(measure_events[m_num], key=lambda x: x["offset"])
+
+                if not evs:
+                    # Authentic full-measure rest
+                    m.insert(0, music21.note.Rest(quarterLength=4.0))
                 else:
-                    new_part.insert(0, music21.instrument.Piano())
+                    curr_pos = 0.0
+                    for ev in evs:
+                        # Insert rest for gap before note
+                        if ev["offset"] > curr_pos:
+                            gap_dur = ev["offset"] - curr_pos
+                            m.insert(curr_pos, music21.note.Rest(quarterLength=gap_dur))
 
-            # Convert seconds to quarter-note metric offsets
-            sec_to_q = tempo_bpm / 60.0
-            grid = 0.25 # 16th note grid
-            last_end_q = 0.0
+                        unique_p = sorted(list(set(ev["pitches"])))
+                        if len(unique_p) == 1 or is_mono:
+                            pitch_val = unique_p[0] if "bass" in name_lower else unique_p[-1]
+                            el = music21.note.Note(pitch_val, quarterLength=ev["dur"])
+                            if el.pitch.accidental is not None and el.pitch.accidental.name == 'natural':
+                                el.pitch.accidental = None
+                        else:
+                            el = music21.chord.Chord(unique_p, quarterLength=ev["dur"])
+                            for po in el.pitches:
+                                if po.accidental is not None and po.accidental.name == 'natural':
+                                    po.accidental = None
 
-            for idx, ev in enumerate(events):
-                raw_start_q = ev["start"] * sec_to_q
-                q_start = round(raw_start_q / grid) * grid
-                if q_start < last_end_q:
-                    q_start = last_end_q
+                        if ev["tie"]:
+                            el.tie = music21.tie.Tie(ev["tie"])
 
-                raw_dur_q = (ev["end"] - ev["start"]) * sec_to_q
-                q_dur = max(grid, round(raw_dur_q / grid) * grid)
+                        m.insert(ev["offset"], el)
+                        curr_pos = ev["offset"] + ev["dur"]
 
-                # Cap duration so subsequent chords don't get sliced
-                if idx + 1 < len(events):
-                    next_start_q = round((events[idx + 1]["start"] * sec_to_q) / grid) * grid
-                    if next_start_q > q_start:
-                        q_dur = min(q_dur, next_start_q - q_start)
+                    # Fill remaining space in measure with rest
+                    if curr_pos < 4.0:
+                        m.insert(curr_pos, music21.note.Rest(quarterLength=4.0 - curr_pos))
 
-                unique_pitches = sorted(list(set(ev["pitches"])))
-                if len(unique_pitches) == 1 or is_mono:
-                    p = unique_pitches[0] if "bass" in name_lower else unique_pitches[-1]
-                    el = music21.note.Note(p)
-                    # Clear auto-assigned explicit natural from integer pitch so makeAccidentals manages notation
-                    if el.pitch.accidental is not None and el.pitch.accidental.name == 'natural':
-                        el.pitch.accidental = None
-                else:
-                    el = music21.chord.Chord(unique_pitches)
-                    for p_obj in el.pitches:
-                        if p_obj.accidental is not None and p_obj.accidental.name == 'natural':
-                            p_obj.accidental = None
+                new_part.append(m)
 
-                el.quarterLength = q_dur
-                new_part.insert(q_start, el)
-                last_end_q = q_start + q_dur
-
-            # 5. Build proper musical measures and optimize accidentals
-            new_part.makeMeasures(inPlace=True)
+            # Optimize accidentals: eliminate redundant naturals and duplicate measure sharps
             new_part.makeAccidentals(
                 inPlace=True,
                 cautionaryPitchClass=False,
                 cautionaryAll=False,
                 cautionaryNotImmediateRepeat=False
             )
-            for n in new_part.recurse().notesAndRests:
-                n.voice = 1
 
             # 6. Wrap in Score with clean empty metadata
             clean_score = music21.stream.Score()
