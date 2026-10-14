@@ -105,7 +105,7 @@ export default function Home() {
         setTimeout(() => scoreRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 150);
       })
       .catch((err) => {
-        console.error("Score fetch failed", err);
+        console.warn("Score fetch notice:", err);
       });
   };
 
@@ -137,7 +137,7 @@ export default function Home() {
     }
   };
 
-  // Fetch History
+  // Fetch History safely without triggering invasive dev overlay on transient disconnects
   const refreshHistory = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/history?t=${Date.now()}`);
@@ -146,42 +146,41 @@ export default function Home() {
         setHistoryList(data);
         return data;
       }
-    } catch (err) {
-      console.error('Failed to fetch history:', err);
+    } catch {
+      // Quietly handle transient server restarts
     }
     return [];
   };
 
   // Reconnect on startup or auto-load latest song
   useEffect(() => {
-    fetch(`${API_BASE_URL}/active`)
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.filename && data.status === 'processing') {
-          setUploading(true);
-          setShowUpload(true);
-          setMessage(data.message || 'Processing audio...');
-          setProgress(data.progress || 10);
-          pollStatus(data.filename);
-        } else {
-          refreshHistory().then(history => {
-            if (history && history.length > 0) {
-              handleLoadSong(history[0]);
-            } else {
-              setShowUpload(true);
-            }
-          });
-        }
-      })
-      .catch(() => {
-        refreshHistory().then(history => {
-          if (history && history.length > 0) {
-            handleLoadSong(history[0]);
-          } else {
+    const initApp = async () => {
+      try {
+        const activeRes = await fetch(`${API_BASE_URL}/active`).catch(() => null);
+        if (activeRes && activeRes.ok) {
+          const data = await activeRes.json();
+          if (data && data.filename && data.status === 'processing') {
+            setUploading(true);
             setShowUpload(true);
+            setMessage(data.message || 'Processing audio...');
+            setProgress(data.progress || 10);
+            pollStatus(data.filename);
+            return;
           }
-        });
-      });
+        }
+      } catch {
+        // Fallback to history
+      }
+
+      const history = await refreshHistory();
+      if (history && history.length > 0) {
+        handleLoadSong(history[0]);
+      } else {
+        setShowUpload(true);
+      }
+    };
+
+    initApp();
   }, []);
 
   /* ── File Upload Handlers ───────────────────────────────── */
