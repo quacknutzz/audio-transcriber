@@ -209,7 +209,31 @@ class TranscriptionService:
                             prev.end = max(prev.start + 0.06, n.start)
                         if n.start >= prev.end:
                             mono_notes.append(n)
-                    instrument.notes = mono_notes
+
+                    # 3. Vocal Vibrato & Micro-note Smoothing:
+                    # Singing vibrato (~5-6Hz) oscillates pitch by +-1 semitone.
+                    # Merge consecutive micro-notes into the primary sustained pitch to eliminate accidental stutter.
+                    if inst == "vocals":
+                        smoothed_notes = []
+                        for n in mono_notes:
+                            if not smoothed_notes:
+                                smoothed_notes.append(n)
+                                continue
+                            prev = smoothed_notes[-1]
+                            gap = n.start - prev.end
+                            pitch_diff = abs(n.pitch - prev.pitch)
+                            
+                            if gap < 0.08 and pitch_diff <= 1 and ((prev.end - prev.start < 0.22) or (n.end - n.start < 0.22)):
+                                if (prev.end - prev.start) >= (n.end - n.start):
+                                    prev.end = n.end
+                                else:
+                                    n.start = prev.start
+                                    smoothed_notes[-1] = n
+                            else:
+                                smoothed_notes.append(n)
+                        instrument.notes = smoothed_notes
+                    else:
+                        instrument.notes = mono_notes
                 else:
                     instrument.notes = filtered_notes
             

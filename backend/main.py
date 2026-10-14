@@ -164,8 +164,9 @@ async def process_audio_task(file_path: Path, filename: str):
             # MusicXML conversion
             if midi_path and midi_path.exists():
                 try:
+                    drum_path = stems.get("drums")
                     xml_path = music_processing_service.midi_to_xml(
-                        midi_path, output_name, audio_ref_path=file_path
+                        midi_path, output_name, audio_ref_path=file_path, drum_ref_path=drum_path
                     )
                     results_urls[inst] = f"/xml/{xml_path.name}"
                     logger.info(f"Successfully generated sheet music for {inst}: {xml_path.name}")

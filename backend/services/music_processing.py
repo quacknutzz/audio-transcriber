@@ -8,44 +8,50 @@ class MusicProcessingService:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
-    def detect_attributes(self, audio_path: Path):
+    def detect_attributes(self, audio_path: Path, drum_path: Path = None):
         """
         Uses Librosa to detect BPM and Key from the audio.
+        If an isolated drum track is available, detects tempo from drum transients for metronomic accuracy.
         """
         try:
             import librosa
             import numpy as np
             
-            y, sr = librosa.load(str(audio_path), sr=None, duration=60) # Analyze first 60s
-            
-            # 1. Detect Tempo
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-            tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+            # 1. Detect Tempo (Prefer isolated drum transients if available)
+            tempo_target = drum_path if (drum_path and drum_path.exists()) else audio_path
+            y_tempo, sr_tempo = librosa.load(str(tempo_target), sr=22050, duration=90)
+            onset_env = librosa.onset.onset_strength(y=y_tempo, sr=sr_tempo)
+            tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr_tempo)
             if isinstance(tempo, np.ndarray):
                 tempo = tempo.item()
             
-            # 2. Detect Key
-            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-            # Simple summation to find Tonic
+            # If tempo is excessively slow (under 65), check if double-time is more standard
+            if tempo < 65.0:
+                tempo = tempo * 2.0
+            
+            # 2. Detect Key from harmonic audio
+            y_harm, sr_harm = librosa.load(str(audio_path), sr=22050, duration=60)
+            chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr_harm)
             chroma_sum = np.sum(chroma, axis=1)
             top_idx = np.argmax(chroma_sum)
-            # Map index to Note Name (0=C, 1=C#, etc)
             notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
             key_note = notes[top_idx]
             
-            self.logger.info(f"Detected Attributes: Tempo={tempo:.1f}, Key={key_note}")
+            self.logger.info(f"Detected Attributes: Tempo={tempo:.1f} BPM, Key={key_note} (source={tempo_target.name})")
             return tempo, key_note
             
         except Exception as e:
             self.logger.warning(f"Attribute detection failed: {e}")
             return 120.0, "C"
 
-    def midi_to_xml(self, midi_path: Path, output_name: str, audio_ref_path: Path = None) -> Path:
+    def midi_to_xml(self, midi_path: Path, output_name: str, audio_ref_path: Path = None, drum_ref_path: Path = None) -> Path:
         """
         Converts a MIDI file to clean, professionally formatted MusicXML:
-        - Groups near-simultaneous polyphonic notes into coherent chords rather than slicing with chordify.
+        - Detects song key using Krumhansl-Schmuckler harmonic analysis on transcribed notes.
+        - Injects proper key signature to eliminate redundant sharp and natural accidentals.
+        - Enforces measure-level accidental deduplication.
+        - Groups polyphonic notes into coherent chords rather than slicing.
         - Preserves pure monophonic melody lines for vocals and bass.
-        - Automatically creates valid musical measures and strips fragment metadata.
         """
         import re
         import pretty_midi
@@ -57,7 +63,7 @@ class MusicProcessingService:
             tempo_bpm = 120.0
             key_tonic = "C"
             if audio_ref_path and audio_ref_path.exists():
-                tempo_bpm, key_tonic = self.detect_attributes(audio_ref_path)
+                tempo_bpm, key_tonic = self.detect_attributes(audio_ref_path, drum_ref_path)
 
             name_lower = output_name.lower()
             is_mono = any(m in name_lower for m in ["vocal", "voice", "bass"])
@@ -99,13 +105,28 @@ class MusicProcessingService:
                         events[-1]["pitches"].append(n.pitch)
                         events[-1]["end"] = max(events[-1]["end"], n.end)
 
-            # 4. Construct music21 Part
+            # 4. Determine harmonic key signature from transcribed notes (Krumhansl-Schmuckler)
+            detected_key = None
+            try:
+                temp_stream = music21.stream.Stream()
+                for n in clean_notes:
+                    temp_stream.append(music21.note.Note(n.pitch))
+                if len(temp_stream.notes) >= 3:
+                    detected_key = temp_stream.analyze('key')
+                    self.logger.info(f"Music21 K-S Key for {output_name}: {detected_key} (sharps={detected_key.sharps})")
+            except Exception as k_err:
+                self.logger.warning(f"Key analysis fallback: {k_err}")
+
+            if not detected_key:
+                detected_key = music21.key.Key(key_tonic)
+
+            # Construct music21 Part
             new_part = music21.stream.Part()
             new_part.id = 'P1'
             new_part.partName = ''
 
             # Key, Tempo, Time Signature
-            new_part.insert(0, music21.key.Key(key_tonic))
+            new_part.insert(0, detected_key)
             new_part.insert(0, music21.tempo.MetronomeMark(number=round(tempo_bpm)))
             new_part.insert(0, music21.meter.TimeSignature('4/4'))
 
@@ -148,15 +169,27 @@ class MusicProcessingService:
                 if len(unique_pitches) == 1 or is_mono:
                     p = unique_pitches[0] if "bass" in name_lower else unique_pitches[-1]
                     el = music21.note.Note(p)
+                    # Clear auto-assigned explicit natural from integer pitch so makeAccidentals manages notation
+                    if el.pitch.accidental is not None and el.pitch.accidental.name == 'natural':
+                        el.pitch.accidental = None
                 else:
                     el = music21.chord.Chord(unique_pitches)
+                    for p_obj in el.pitches:
+                        if p_obj.accidental is not None and p_obj.accidental.name == 'natural':
+                            p_obj.accidental = None
 
                 el.quarterLength = q_dur
                 new_part.insert(q_start, el)
                 last_end_q = q_start + q_dur
 
-            # 5. Build proper musical measures
+            # 5. Build proper musical measures and optimize accidentals
             new_part.makeMeasures(inPlace=True)
+            new_part.makeAccidentals(
+                inPlace=True,
+                cautionaryPitchClass=False,
+                cautionaryAll=False,
+                cautionaryNotImmediateRepeat=False
+            )
             for n in new_part.recurse().notesAndRests:
                 n.voice = 1
 
