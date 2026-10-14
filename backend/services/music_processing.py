@@ -42,117 +42,133 @@ class MusicProcessingService:
 
     def midi_to_xml(self, midi_path: Path, output_name: str, audio_ref_path: Path = None) -> Path:
         """
-        Converts a MIDI file to MusicXML with metadata.
+        Converts a MIDI file to clean, professionally formatted MusicXML:
+        - Groups near-simultaneous polyphonic notes into coherent chords rather than slicing with chordify.
+        - Preserves pure monophonic melody lines for vocals and bass.
+        - Automatically creates valid musical measures and strips fragment metadata.
         """
+        import re
+        import pretty_midi
         output_xml_path = self.output_dir / f"{output_name}.musicxml"
         self.logger.info(f"Converting MIDI to XML: {midi_path} -> {output_xml_path}")
         
         try:
-            # Detect Metadata if reference audio provided
+            # 1. Detect BPM & Key
             tempo_bpm = 120.0
             key_tonic = "C"
             if audio_ref_path and audio_ref_path.exists():
                 tempo_bpm, key_tonic = self.detect_attributes(audio_ref_path)
 
-            # Load MIDI
-            mf = music21.converter.parse(str(midi_path))
-            
-            # We want to preserve tracks/parts if they exist, but usually basic-pitch outputs one track.
-            # We will flatten it to one part but KEEP polyphony (Recurse notes).
-            
-            original_part = mf.parts[0] if mf.parts else mf.flatten()
-            
+            name_lower = output_name.lower()
+            is_mono = any(m in name_lower for m in ["vocal", "voice", "bass"])
+            is_drum = any(d in name_lower for d in ["drums", "drum", "percussion"])
+
+            # 2. Parse MIDI with PrettyMIDI
+            pm = pretty_midi.PrettyMIDI(str(midi_path))
+            if not pm.instruments:
+                raise ValueError("MIDI file contains no instrument tracks")
+
+            inst = pm.instruments[0]
+
+            # Filter out microscopic velocity/transient noise
+            clean_notes = [
+                n for n in inst.notes
+                if not (n.end - n.start < 0.08 and n.velocity < 45)
+            ]
+
+            # 3. Cluster notes into coherent musical events
+            events = []
+            if is_mono:
+                # Strictly sequential monophonic melody
+                sorted_notes = sorted(clean_notes, key=lambda x: x.start)
+                for n in sorted_notes:
+                    if not events:
+                        events.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
+                    else:
+                        prev = events[-1]
+                        if n.start < prev["end"]:
+                            prev["end"] = max(prev["start"] + 0.05, n.start)
+                        if n.start >= prev["end"]:
+                            events.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
+            else:
+                # Polyphonic chord clustering: group notes starting within 70ms into unified chords
+                for n in sorted(clean_notes, key=lambda x: x.start):
+                    if not events or (n.start - events[-1]["start"] > 0.07):
+                        events.append({"start": n.start, "end": n.end, "pitches": [n.pitch]})
+                    else:
+                        events[-1]["pitches"].append(n.pitch)
+                        events[-1]["end"] = max(events[-1]["end"], n.end)
+
+            # 4. Construct music21 Part
             new_part = music21.stream.Part()
             new_part.id = 'P1'
-            new_part.partName = output_name
-            
-            # 1. Insert Metadata
-            # Key
+            new_part.partName = ''
+
+            # Key, Tempo, Time Signature
             new_part.insert(0, music21.key.Key(key_tonic))
-            # Tempo
             new_part.insert(0, music21.tempo.MetronomeMark(number=round(tempo_bpm)))
-            # Time Sig (assume 4/4 for now, detection is hard)
             new_part.insert(0, music21.meter.TimeSignature('4/4'))
 
-            # Detect Instrument (Clef/Patch)
-            name_lower = output_name.lower()
             if "bass" in name_lower:
                 new_part.insert(0, music21.clef.BassClef())
                 new_part.insert(0, music21.instrument.ElectricBass())
-            elif "guitar" in name_lower:
-                new_part.insert(0, music21.clef.TrebleClef())
-                new_part.insert(0, music21.instrument.ElectricGuitar())
-            elif "piano" in name_lower:
-                new_part.insert(0, music21.instrument.Piano())
-            elif "vocal" in name_lower or "voice" in name_lower:
-                new_part.insert(0, music21.instrument.Vocalist())
-            elif "drums" in name_lower or "drum" in name_lower:
+            elif is_drum:
                 new_part.insert(0, music21.clef.PercussionClef())
                 new_part.insert(0, music21.instrument.Percussion())
             else:
-                new_part.insert(0, music21.instrument.Piano()) # Default
+                new_part.insert(0, music21.clef.TrebleClef())
+                if "vocal" in name_lower or "voice" in name_lower:
+                    new_part.insert(0, music21.instrument.Vocalist())
+                elif "guitar" in name_lower:
+                    new_part.insert(0, music21.instrument.ElectricGuitar())
+                else:
+                    new_part.insert(0, music21.instrument.Piano())
 
-            # 2. Smart Quantization & Voice Separation
-            # Grid = 16th note (0.25)
-            grid = 0.25
-            is_monophonic = any(m in name_lower for m in ["vocal", "voice", "bass"])
-            is_drum = any(d in name_lower for d in ["drums", "drum", "percussion"])
-            last_end_offset = 0.0
-            
-            import copy
-            # Use flatten().notes to get absolute song offsets instead of measure-relative!
-            for el in original_part.flatten().notes:
-                # If an incoming element was grouped as a chord in a monophonic track, extract the melody/root
-                if el.isChord and is_monophonic:
-                    chosen_pitch = max(el.pitches) if "bass" not in name_lower else min(el.pitches)
-                    single_note = music21.note.Note(chosen_pitch)
-                    single_note.quarterLength = el.quarterLength
-                    single_note.offset = el.offset
-                    el = single_note
+            # Convert seconds to quarter-note metric offsets
+            sec_to_q = tempo_bpm / 60.0
+            grid = 0.25 # 16th note grid
+            last_end_q = 0.0
 
-                # Snap offset (start time)
-                raw_offset = el.offset
-                quantized_offset = round(raw_offset / grid) * grid
-                
-                # For monophonic lines, ensure notes do not overlap or collide at the same offset
-                if is_monophonic and quantized_offset < last_end_offset:
-                    quantized_offset = last_end_offset
-                
-                # Snap duration
-                raw_dur = el.duration.quarterLength
-                quantized_dur = round(raw_dur / grid) * grid
-                if quantized_dur < grid: 
-                    quantized_dur = grid # Min duration
-                
-                new_el = copy.deepcopy(el)
-                if hasattr(new_el, 'volume') and hasattr(el, 'volume') and el.volume is not None:
-                    new_el.volume = el.volume
-                new_el.quarterLength = quantized_dur
-                
-                # Insert at new absolute offset
-                new_part.insert(quantized_offset, new_el)
-                if is_monophonic:
-                    last_end_offset = quantized_offset + quantized_dur
+            for idx, ev in enumerate(events):
+                raw_start_q = ev["start"] * sec_to_q
+                q_start = round(raw_start_q / grid) * grid
+                if q_start < last_end_q:
+                    q_start = last_end_q
 
-            # 3. Chordify (ONLY for polyphonic pitched instruments: piano, guitar, keys, other)
-            # Vocals and bass are monophonic melodies and must NEVER be chordified.
-            # Drums are percussion instruments and must NEVER be chordified.
-            if not is_monophonic and not is_drum:
-                new_part = new_part.chordify()
+                raw_dur_q = (ev["end"] - ev["start"]) * sec_to_q
+                q_dur = max(grid, round(raw_dur_q / grid) * grid)
 
-            # 4. Clean up notation (ties, beams)
-            try:
-                new_part.makeNotation(inPlace=True)
-            except Exception as notation_e:
-                self.logger.warning(f"makeNotation skipped (expected for percussion/Unpitched): {notation_e}")
-            
-            # 5. Force Voice 1 (to satisfy strict parsers)
+                # Cap duration so subsequent chords don't get sliced
+                if idx + 1 < len(events):
+                    next_start_q = round((events[idx + 1]["start"] * sec_to_q) / grid) * grid
+                    if next_start_q > q_start:
+                        q_dur = min(q_dur, next_start_q - q_start)
+
+                unique_pitches = sorted(list(set(ev["pitches"])))
+                if len(unique_pitches) == 1 or is_mono:
+                    p = unique_pitches[0] if "bass" in name_lower else unique_pitches[-1]
+                    el = music21.note.Note(p)
+                else:
+                    el = music21.chord.Chord(unique_pitches)
+
+                el.quarterLength = q_dur
+                new_part.insert(q_start, el)
+                last_end_q = q_start + q_dur
+
+            # 5. Build proper musical measures
+            new_part.makeMeasures(inPlace=True)
             for n in new_part.recurse().notesAndRests:
                 n.voice = 1
-            
-            # Write to MusicXML
+
+            # 6. Export to MusicXML
             new_part.write('musicxml', fp=str(output_xml_path))
-            
+
+            # 7. Post-process XML: strip "Music21 Fragment" and placeholder composer
+            xml_content = output_xml_path.read_text(encoding='utf-8')
+            xml_content = re.sub(r'<movement-title>.*?</movement-title>', '', xml_content)
+            xml_content = re.sub(r'<creator.*?>.*?</creator>', '', xml_content)
+            output_xml_path.write_text(xml_content, encoding='utf-8')
+
             return output_xml_path
 
         except Exception as e:

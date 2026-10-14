@@ -22,9 +22,9 @@ const INSTRUMENT_ORDER = ['vocals', 'piano', 'guitar', 'bass', 'drums', 'other']
 /* ── Pipeline stages for progress display ────────────────── */
 const STAGES = [
   { key: 'upload', label: 'Upload', threshold: 5 },
-  { key: 'separate', label: 'Stem Separation', threshold: 10 },
-  { key: 'transcribe', label: 'Transcribing', threshold: 50 },
-  { key: 'render', label: 'Notation Export', threshold: 90 },
+  { key: 'separate', label: 'Separation', threshold: 10 },
+  { key: 'transcribe', label: 'Transcription', threshold: 50 },
+  { key: 'render', label: 'Score Generation', threshold: 90 },
   { key: 'complete', label: 'Ready', threshold: 100 },
 ];
 
@@ -39,7 +39,7 @@ interface HistoryItem {
 }
 
 export default function Home() {
-  /* ── Safe download (prevents Electron navigation) ─── */
+  /* ── Safe download helper (Electron-safe) ───────────────── */
   const downloadFile = async (url: string, filename: string) => {
     try {
       const res = await fetch(url);
@@ -62,40 +62,53 @@ export default function Home() {
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
 
-  // Active Studio state
+  // Active Project & History
   const [currentSong, setCurrentSong] = useState<string | null>(null);
   const [historyList, setHistoryList] = useState<HistoryItem[]>([]);
   const [showUpload, setShowUpload] = useState(false);
 
+  // Stems & Scores
   const [availableStems, setAvailableStems] = useState<{ [key: string]: string }>({});
   const [availableStemsAudio, setAvailableStemsAudio] = useState<{ [key: string]: string }>({});
   const [activeStem, setActiveStem] = useState<string | null>(null);
-  const [activeAudio, setActiveAudio] = useState<string | null>(null);
   const [musicXml, setMusicXml] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
+  // Audio Playback State (Rock-solid stem player)
+  const [playingTrack, setPlayingTrack] = useState<string | null>(null);
+  const audioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scoreRef = useRef<HTMLDivElement>(null);
 
-  // Helper to get correct URL for audio/XML
-  const getAbsoluteUrl = (urlPath: string) => urlPath.startsWith('http') ? urlPath : `${API_BASE_URL}${urlPath}`;
+  // Helper for absolute API URLs
+  const getAbsoluteUrl = (urlPath: string) => (urlPath.startsWith('http') ? urlPath : `${API_BASE_URL}${urlPath}`);
 
-  // Handle audio play to ensure only one plays at a time
-  const handleAudioPlay = (instrument: string) => {
-    setActiveAudio(instrument);
-    document.querySelectorAll('audio').forEach(audio => {
-      const currentSrc = availableStemsAudio[instrument] ? getAbsoluteUrl(availableStemsAudio[instrument]) : '';
-      if (!audio.paused && audio.src !== currentSrc) {
-        audio.pause();
-      }
-    });
+  // Stem Play / Pause Toggle
+  const togglePlayStem = (instrument: string) => {
+    const targetAudio = audioRefs.current[instrument];
+    if (!targetAudio) return;
+
+    if (playingTrack === instrument && !targetAudio.paused) {
+      targetAudio.pause();
+      setPlayingTrack(null);
+    } else {
+      // Pause any other stem currently playing
+      Object.entries(audioRefs.current).forEach(([inst, audioEl]) => {
+        if (inst !== instrument && audioEl && !audioEl.paused) {
+          audioEl.pause();
+          audioEl.currentTime = 0;
+        }
+      });
+      targetAudio.play().catch(console.error);
+      setPlayingTrack(instrument);
+    }
   };
 
-  // Load sheet music XML
+  // Load Sheet Music XML
   const handleScoreView = (instrumentName: string, xmlUrl: string) => {
     const fetchUrl = getAbsoluteUrl(xmlUrl);
-    setMessage(`Loading ${instrumentName} sheet music...`);
 
     fetch(fetchUrl)
       .then(res => {
@@ -105,25 +118,31 @@ export default function Home() {
       .then(text => {
         setMusicXml(text);
         setActiveStem(instrumentName);
-        setMessage(`Viewing ${instrumentName} score`);
         setTimeout(() => scoreRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 150);
       })
       .catch((err) => {
         console.error("Score fetch failed", err);
-        setMessage(`Error loading ${instrumentName} score`);
       });
   };
 
   // Load an entire song into the Studio
   const handleLoadSong = (songItem: HistoryItem, preferredInst?: string) => {
+    // Stop any playing audio
+    Object.values(audioRefs.current).forEach(audioEl => {
+      if (audioEl && !audioEl.paused) {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+      }
+    });
+    setPlayingTrack(null);
+
     setCurrentSong(songItem.filename);
     setAvailableStems(songItem.results || {});
     setAvailableStemsAudio(songItem.stems || {});
     setUploading(false);
     setShowUpload(false);
-    setMessage(`Loaded: ${songItem.filename.replace(/\.[^/.]+$/, '')}`);
 
-    // Auto-select preferred track with sheet music (e.g. vocals or piano)
+    // Auto-select first track with score
     const availableScores = songItem.results || {};
     let targetInst = preferredInst;
     if (!targetInst || !availableScores[targetInst]) {
@@ -140,7 +159,7 @@ export default function Home() {
     }
   };
 
-  // Fetch history list from backend
+  // Fetch History
   const refreshHistory = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/history?t=${Date.now()}`);
@@ -155,7 +174,7 @@ export default function Home() {
     return [];
   };
 
-  // On mount: reconnect to active job or auto-load the latest song from history
+  // Reconnect on startup or auto-load latest song
   useEffect(() => {
     fetch(`${API_BASE_URL}/active`)
       .then(res => res.json())
@@ -163,7 +182,7 @@ export default function Home() {
         if (data && data.filename && data.status === 'processing') {
           setUploading(true);
           setShowUpload(true);
-          setMessage(data.message || 'Reconnecting to active transcription...');
+          setMessage(data.message || 'Processing audio...');
           setProgress(data.progress || 10);
           pollStatus(data.filename);
         } else {
@@ -187,7 +206,7 @@ export default function Home() {
       });
   }, []);
 
-  /* ── File handling ─────────────────────────────────────── */
+  /* ── File Upload Handlers ───────────────────────────────── */
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
   };
@@ -203,7 +222,6 @@ export default function Home() {
     }
   };
 
-  /* ── Upload & poll ─────────────────────────────────────── */
   const handleUpload = async () => {
     if (!file) return;
     setUploading(true);
@@ -211,7 +229,6 @@ export default function Home() {
     setMessage('Uploading...');
     setProgress(5);
     setActiveStem(null);
-    setActiveAudio(null);
     setMusicXml(null);
 
     const formData = new FormData();
@@ -224,11 +241,11 @@ export default function Home() {
       });
       if (!response.ok) throw new Error('Upload failed');
       const data = await response.json();
-      setMessage('Processing started on local GPU...');
+      setMessage('Processing audio stems...');
       pollStatus(data.filename);
     } catch (err: any) {
       console.error('Upload error:', err);
-      setMessage(`Upload failed: ${err.message || String(err)}. Please try again.`);
+      setMessage(`Upload failed: ${err.message || String(err)}.`);
       setUploading(false);
     }
   };
@@ -258,14 +275,14 @@ export default function Home() {
           return;
         } else if (data.status === 'error') {
           setUploading(false);
-          setMessage(`Transcription failed: ${data.message || 'Unknown error'}`);
+          setMessage(`Error: ${data.message || 'Processing failed'}`);
           return;
         }
       }
     } catch (err) {
       console.error('Polling error', err);
     }
-    setTimeout(() => pollStatus(filename), 2500);
+    setTimeout(() => pollStatus(filename), 2000);
   };
 
   /* ── Combined list of active instruments ────────────────── */
@@ -284,51 +301,42 @@ export default function Home() {
   return (
     <main className="relative min-h-screen flex flex-col items-center bg-[#0d0c0b] text-[#f2f0eb] font-sans antialiased selection:bg-[#3d3831] selection:text-[#faf9f6]">
 
-      {/* ── Minimal tactile grid texture ────────────────── */}
-      <div
-        className="pointer-events-none fixed inset-0 opacity-[0.02]"
-        style={{
-          backgroundImage: 'linear-gradient(rgba(240,235,225,0.15) 1px, transparent 1px), linear-gradient(90deg, rgba(240,235,225,0.15) 1px, transparent 1px)',
-          backgroundSize: '32px 32px',
-        }}
-      />
-
       {/* ── Content container ────────────────────────────── */}
       <div className="relative z-10 flex flex-col items-center w-full max-w-5xl px-6 py-8 sm:py-12">
 
-        {/* ── History button (top-right) ─────────────────── */}
-        <button
-          onClick={() => setHistoryOpen(true)}
-          className="fixed top-5 right-5 z-30 px-3 py-1.5 rounded-lg bg-[#191816] border border-[#2e2b27] hover:bg-[#252320] hover:border-[#423e38] flex items-center gap-2 transition-colors group shadow-md"
-          title="Transcription History"
-        >
-          <svg className="w-3.5 h-3.5 text-[#a8a196] group-hover:text-[#edeae4] transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span className="text-xs font-medium text-[#c4beb3] group-hover:text-white">History</span>
-          {historyList.length > 0 && (
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#252320] text-[#a8a196] border border-[#36332e]">
-              {historyList.length}
-            </span>
-          )}
-        </button>
-
-        {/* ── Minimalist Header ──────────────────────────── */}
-        <div className="text-center mb-8 space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#2b2926] bg-[#161514] text-[11px] font-mono text-[#8a847b]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#bbb4a8]" />
-            Local Audio-to-Score Transcription
+        {/* ── Top Bar: Brand & History Action ─────────────── */}
+        <div className="w-full flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-[#f4f2ed]">
+              GhostNote
+            </h1>
+            <p className="text-xs text-[#8a847b] mt-0.5">
+              Sheet music & stem isolation studio
+            </p>
           </div>
-          <h1 className="text-3xl sm:text-5xl tracking-tight font-black text-[#f4f2ed]">
-            Ghost<span className="text-[#969085] font-light">Note</span>
-          </h1>
+
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="px-3.5 py-1.5 rounded-lg bg-[#191816] border border-[#2e2b27] hover:bg-[#252320] hover:border-[#423e38] flex items-center gap-2 transition-colors text-xs font-medium text-[#c4beb3] hover:text-white shadow-xs"
+            title="Open History"
+          >
+            <svg className="w-3.5 h-3.5 text-[#a8a196]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>History</span>
+            {historyList.length > 0 && (
+              <span className="text-[11px] px-1.5 py-0.2 rounded bg-[#252320] text-[#a8a196] border border-[#36332e]">
+                {historyList.length}
+              </span>
+            )}
+          </button>
         </div>
 
-        {/* ── Recent Songs Switcher Bar ──────────────────── */}
+        {/* ── Project Switcher Bar ────────────────────────── */}
         {historyList.length > 0 && (
           <div className="w-full mb-8 flex flex-col items-center">
-            <div className="flex items-center gap-1.5 flex-wrap justify-center p-1.5 rounded-xl bg-[#151413] border border-[#262421] shadow-inner">
-              <span className="text-[10px] font-mono uppercase tracking-wider text-[#69645d] px-2.5">
+            <div className="flex items-center gap-1.5 flex-wrap justify-center p-1.5 rounded-xl bg-[#151413] border border-[#262421]">
+              <span className="text-xs text-[#6e6860] px-2 font-medium">
                 Projects:
               </span>
 
@@ -342,30 +350,29 @@ export default function Home() {
                     className={`
                       px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 active:scale-98
                       ${isSelected
-                        ? 'bg-[#282623] text-[#ffffff] border border-[#d6cfc2] shadow-sm'
+                        ? 'bg-[#282623] text-[#ffffff] border border-[#d6cfc2] shadow-xs'
                         : 'bg-[#1b1a18] text-[#9c958b] hover:text-[#edeae4] hover:bg-[#22201d] border border-[#2a2825]'
                       }
                     `}
                     title={`Open ${dName}`}
                   >
-                    <span className="text-xs">🎵</span>
-                    <span className="truncate max-w-[150px] sm:max-w-[200px]">{dName}</span>
+                    <span>🎵</span>
+                    <span className="truncate max-w-[150px] sm:max-w-[220px]">{dName}</span>
                     {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-[#ded8ce]" />}
                   </button>
                 );
               })}
 
-              {/* Toggle upload button */}
               <button
                 onClick={() => setShowUpload(!showUpload)}
                 className={`
-                  px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 border active:scale-98
+                  px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 border active:scale-98
                   ${showUpload
                     ? 'bg-[#292623] text-[#edeae4] border-[#4a453e]'
-                    : 'bg-[#161514] text-[#736d64] hover:text-[#c7c0b4] border-dashed border-[#302d29] hover:bg-[#1e1d1b]'
+                    : 'bg-[#161514] text-[#8a847b] hover:text-[#ded9ce] border-dashed border-[#302d29] hover:bg-[#1e1d1b]'
                   }
                 `}
-                title="Transcribe a new audio file"
+                title="Import another audio file"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   {showUpload ? (
@@ -374,13 +381,13 @@ export default function Home() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                   )}
                 </svg>
-                {showUpload ? 'Close' : '+ New Audio'}
+                {showUpload ? 'Close' : '+ Import Audio'}
               </button>
             </div>
           </div>
         )}
 
-        {/* ── Minimalist Upload Dropzone ─────────────────── */}
+        {/* ── Clean Upload Dropzone ───────────────────────── */}
         {(showUpload || !currentSong) && (
           <div className="w-full max-w-xl mb-8 animate-fadeIn">
             <div
@@ -415,7 +422,7 @@ export default function Home() {
                       </svg>
                     </div>
                     <p className="text-xs font-semibold text-[#f0ede6]">{file.name}</p>
-                    <p className="text-[11px] font-mono text-[#787268]">{(file.size / (1024 * 1024)).toFixed(1)} MB • Click to change</p>
+                    <p className="text-xs text-[#787268]">{(file.size / (1024 * 1024)).toFixed(1)} MB • Click to change</p>
                   </>
                 ) : (
                   <>
@@ -427,30 +434,28 @@ export default function Home() {
                     <p className="text-xs font-medium text-[#c9c3b8]">
                       Drop audio file here or <span className="text-[#f5f3ef] underline underline-offset-2">browse</span>
                     </p>
-                    <p className="text-[10px] font-mono text-[#635e57]">MP3, WAV, M4A, FLAC • Processed locally on RTX GPU</p>
+                    <p className="text-xs text-[#635e57]">MP3, WAV, M4A, FLAC</p>
                   </>
                 )}
               </div>
             </div>
 
-            {/* Action button */}
             {file && !uploading && (
               <button
                 onClick={handleUpload}
                 disabled={!file || uploading}
-                className="mt-3 w-full rounded-lg bg-[#ded9cf] hover:bg-[#edeae4] text-[#141312] py-2.5 px-4 font-bold text-xs tracking-wide transition-colors active:scale-98 shadow-sm"
+                className="mt-3 w-full rounded-lg bg-[#ded9cf] hover:bg-[#edeae4] text-[#141312] py-2.5 px-4 font-semibold text-xs tracking-wide transition-colors active:scale-98 shadow-sm"
               >
-                Start Transcription
+                Transcribe Audio
               </button>
             )}
           </div>
         )}
 
-        {/* ── Minimalist Progress Bar ─────────────────────── */}
+        {/* ── Clean Progress Bar ──────────────────────────── */}
         {uploading && (
           <div className="w-full max-w-xl mb-8 animate-fadeIn">
             <div className="bg-[#161513] rounded-xl border border-[#2d2a27] p-5">
-              {/* Stages */}
               <div className="flex items-center justify-between mb-4">
                 {STAGES.map((stage, i) => {
                   const isPast = currentStageIndex > i;
@@ -458,14 +463,14 @@ export default function Home() {
                   return (
                     <div key={stage.key} className="flex items-center gap-1.5 flex-1">
                       <div className={`
-                        w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-mono font-bold transition-colors shrink-0
+                        w-5 h-5 rounded-md flex items-center justify-center text-xs font-semibold transition-colors shrink-0
                         ${isPast ? 'bg-[#292724] text-[#d6cfc2] border border-[#3e3a35]' :
-                          isCurrent ? 'bg-[#ded9cf] text-[#141312] font-black' :
+                          isCurrent ? 'bg-[#ded9cf] text-[#141312] font-bold' :
                             'bg-[#1a1917] text-[#545049] border border-[#24221f]'}
                       `}>
                         {isPast ? '✓' : i + 1}
                       </div>
-                      <span className={`text-[11px] hidden sm:block ${isPast ? 'text-[#a39c91]' : isCurrent ? 'text-[#f0ede6] font-semibold' : 'text-[#4d4943]'}`}>
+                      <span className={`text-xs hidden sm:block ${isPast ? 'text-[#a39c91]' : isCurrent ? 'text-[#f0ede6] font-medium' : 'text-[#4d4943]'}`}>
                         {stage.label}
                       </span>
                       {i < STAGES.length - 1 && (
@@ -476,7 +481,6 @@ export default function Home() {
                 })}
               </div>
 
-              {/* Progress bar track */}
               <div className="w-full bg-[#201f1c] h-1.5 rounded-full overflow-hidden">
                 <div
                   className="bg-[#dcd6ca] h-full transition-all duration-500 ease-out rounded-full"
@@ -484,49 +488,38 @@ export default function Home() {
                 />
               </div>
 
-              {/* Status message */}
               <div className="flex items-center justify-between mt-2.5">
-                <p className="text-[11px] text-[#8a8479] font-mono">{message}</p>
-                <span className="text-[11px] text-[#ded9ce] font-mono font-semibold tabular-nums">{progress}%</span>
+                <p className="text-xs text-[#8a8479]">{message}</p>
+                <span className="text-xs text-[#ded9ce] font-semibold tabular-nums">{progress}%</span>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── Active Studio View ──────────────────────────── */}
+        {/* ── Active Song Studio View ─────────────────────── */}
         {currentSong && allInstrumentKeys.length > 0 && (
           <div className="w-full animate-fadeIn">
 
-            {/* Song Header Strip */}
+            {/* Song Title Bar */}
             <div className="w-full flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl bg-[#171614] border border-[#292724] mb-5">
               <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[10px] font-mono uppercase tracking-widest text-[#736d64]">
-                    Active Project
-                  </span>
-                  <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-[#22201d] text-[#a39d91] border border-[#2e2b27]">
-                    100% Offline AI
-                  </span>
-                  <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-[#22201d] text-[#8a8479] border border-[#2e2b27]">
-                    {Object.keys(availableStems).length} Scores
-                  </span>
-                </div>
                 <h2 className="text-xl sm:text-2xl font-bold text-[#f5f3ef] tracking-tight">
                   {cleanSongTitle}
                 </h2>
+                <p className="text-xs text-[#8a8479] mt-0.5">
+                  {allInstrumentKeys.length} isolated tracks available
+                </p>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => setShowUpload(true)}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-[#b5afa4] bg-[#201f1c] hover:bg-[#2b2925] hover:text-[#f4f1eb] border border-[#2f2c28] transition-colors flex items-center gap-1.5"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                  </svg>
-                  New Track
-                </button>
-              </div>
+              <button
+                onClick={() => setShowUpload(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-[#b5afa4] bg-[#201f1c] hover:bg-[#2b2925] hover:text-[#f4f1eb] border border-[#2f2c28] transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                Import Another Audio
+              </button>
             </div>
 
             {/* Track Cards Grid */}
@@ -536,6 +529,7 @@ export default function Home() {
                 const audioUrl = availableStemsAudio[instrument];
                 const hasScore = !!xmlUrl;
                 const isActive = activeStem === instrument;
+                const isPlaying = playingTrack === instrument;
                 const icon = INSTRUMENT_ICONS[instrument] || '🎵';
 
                 return (
@@ -553,15 +547,15 @@ export default function Home() {
                   >
                     <div>
                       {/* Card Header */}
-                      <div className="flex items-center justify-between mb-2.5">
+                      <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                           <span className="text-lg">{icon}</span>
                           <div>
                             <h3 className="text-xs font-bold capitalize text-[#eeebe4]">
                               {instrument}
                             </h3>
-                            <span className="text-[10px] text-[#6e6860] font-mono">
-                              {hasScore ? 'Score Ready' : 'Percussion Audio'}
+                            <span className="text-[11px] text-[#736e67]">
+                              {hasScore ? 'Score & Stem' : 'Audio Only'}
                             </span>
                           </div>
                         </div>
@@ -573,31 +567,64 @@ export default function Home() {
                               handleScoreView(instrument, xmlUrl);
                             }}
                             className={`
-                              px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors
+                              px-2.5 py-1 text-xs font-semibold rounded-md transition-colors
                               ${isActive
                                 ? 'bg-[#ded9cf] text-[#141312]'
-                                : 'bg-[#22201d] text-[#999286] hover:text-[#f2efe8] hover:bg-[#2c2a26] border border-[#302d29]'
+                                : 'bg-[#22201d] text-[#a8a195] hover:text-[#f2efe8] hover:bg-[#2c2a26] border border-[#302d29]'
                               }
                             `}
                           >
-                            {isActive ? 'Viewing' : 'Score'}
+                            {isActive ? 'Viewing' : 'View Score'}
                           </button>
                         ) : (
-                          <span className="text-[10px] font-mono text-[#66615a] px-2 py-0.5 rounded bg-[#1c1b19] border border-[#262422]">
+                          <span className="text-[11px] text-[#6b665f] px-2 py-0.5 rounded bg-[#1c1b19] border border-[#262422]">
                             Audio
                           </span>
                         )}
                       </div>
 
-                      {/* Mini Audio Player */}
+                      {/* Stem Player Controls */}
                       {audioUrl && (
                         <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                          {/* Hidden actual audio element with clean ref */}
                           <audio
-                            controls
-                            onPlay={() => handleAudioPlay(instrument)}
+                            ref={(el) => { audioRefs.current[instrument] = el; }}
                             src={getAbsoluteUrl(audioUrl)}
-                            className="w-full h-7 opacity-75 hover:opacity-100 transition-opacity"
+                            onEnded={() => setPlayingTrack(null)}
+                            onPause={() => { if (playingTrack === instrument) setPlayingTrack(null); }}
+                            onPlay={() => { setPlayingTrack(instrument); }}
+                            preload="metadata"
                           />
+
+                          {/* Custom Play/Pause Button */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => togglePlayStem(instrument)}
+                              className={`
+                                flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors active:scale-95
+                                ${isPlaying
+                                  ? 'bg-[#ded9cf] text-[#141312]'
+                                  : 'bg-[#22201d] text-[#cfc9be] hover:bg-[#2c2925] border border-[#33302b]'
+                                }
+                              `}
+                            >
+                              {isPlaying ? (
+                                <>
+                                  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
+                                    <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                                  </svg>
+                                  <span>Pause Stem</span>
+                                </>
+                              ) : (
+                                <>
+                                  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
+                                    <path d="M8 5v14l11-7z" />
+                                  </svg>
+                                  <span>Play Stem</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -605,18 +632,18 @@ export default function Home() {
                     {/* Card Footer */}
                     {hasScore && (
                       <div className="mt-3 flex justify-between items-center pt-2 border-t border-[#252320]" onClick={(e) => e.stopPropagation()}>
-                        <span className="text-[10px] font-mono text-[#787268]">
-                          {isActive ? '● Currently Loaded' : 'Click to View'}
+                        <span className="text-[11px] text-[#787268]">
+                          {isActive ? '● Currently on screen' : 'Click card to view'}
                         </span>
                         <button
                           onClick={() => downloadFile(getAbsoluteUrl(xmlUrl), `${cleanSongTitle}_${instrument}.musicxml`)}
-                          className="text-[11px] font-mono text-[#8a8377] hover:text-[#e8e4dc] transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer"
+                          className="text-xs text-[#8a8377] hover:text-[#e8e4dc] transition-colors flex items-center gap-1 bg-transparent border-none cursor-pointer font-medium"
                           title="Download MusicXML file"
                         >
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                           </svg>
-                          XML
+                          Export XML
                         </button>
                       </div>
                     )}
@@ -630,16 +657,16 @@ export default function Home() {
               <div ref={scoreRef} className="w-full mt-3 mb-16 animate-fadeIn">
                 <div className="rounded-xl overflow-hidden border border-[#2e2b27] bg-[#161513] shadow-lg">
                   {/* Score toolbar header */}
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between px-5 py-3 bg-[#191816] border-b border-[#292724] gap-2">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between px-5 py-3.5 bg-[#191816] border-b border-[#292724] gap-2">
                     <div className="flex items-center gap-2.5">
                       <span className="text-xl">{INSTRUMENT_ICONS[activeStem] || '🎵'}</span>
                       <div>
-                        <h2 className="text-xs font-bold text-[#f2efe9] capitalize flex items-center gap-2">
+                        <h2 className="text-sm font-bold text-[#f2efe9] capitalize flex items-center gap-2">
                           <span>{activeStem}</span>
-                          <span className="text-[11px] font-normal text-[#8a8479]">— Sheet Music</span>
+                          <span className="text-xs font-normal text-[#8a8479]">— Sheet Music</span>
                         </h2>
-                        <p className="text-[10px] font-mono text-[#6b665e]">
-                          {cleanSongTitle} • Quantized 16th-note notation
+                        <p className="text-xs text-[#6b665e]">
+                          {cleanSongTitle}
                         </p>
                       </div>
                     </div>
@@ -647,7 +674,7 @@ export default function Home() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => downloadFile(getAbsoluteUrl(availableStems[activeStem]), `${cleanSongTitle}_${activeStem}.musicxml`)}
-                        className="px-3 py-1 rounded-md bg-[#23211e] hover:bg-[#2e2b27] text-[#ded9ce] border border-[#38342f] text-xs font-medium transition-colors flex items-center gap-1.5 shadow-xs"
+                        className="px-3 py-1.5 rounded-md bg-[#23211e] hover:bg-[#2e2b27] text-[#ded9ce] border border-[#38342f] text-xs font-medium transition-colors flex items-center gap-1.5 shadow-xs"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -657,8 +684,8 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* Score SVG container (OSMD requires clean white background) */}
-                  <div className="bg-white overflow-x-auto p-3">
+                  {/* Clean Score Canvas (OSMD renders pure music notation) */}
+                  <div className="bg-white overflow-x-auto p-4">
                     <ScoreDisplay xmlData={musicXml} />
                   </div>
                 </div>
