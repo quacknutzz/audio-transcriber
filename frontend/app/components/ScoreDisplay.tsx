@@ -56,11 +56,11 @@ export default function ScoreDisplay({ xmlData }: ScoreDisplayProps) {
             {/* Loading overlay */}
             {loading && (
                 <div className="flex flex-col items-center justify-center py-20 gap-4">
-                    <div className="relative w-12 h-12">
-                        <div className="absolute inset-0 rounded-full border-2 border-indigo-200/30" />
-                        <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-indigo-500 animate-spin" />
+                    <div className="relative w-10 h-10">
+                        <div className="absolute inset-0 rounded-full border-2 border-[#3d3934]" />
+                        <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#d4cdbf] animate-spin" />
                     </div>
-                    <p className="text-sm text-slate-500 font-medium">Rendering sheet music...</p>
+                    <p className="text-xs text-[#8a8479] font-medium">Rendering sheet music notation...</p>
                 </div>
             )}
 

@@ -75,34 +75,18 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  // Audio Playback State (Rock-solid stem player)
-  const [playingTrack, setPlayingTrack] = useState<string | null>(null);
-  const audioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scoreRef = useRef<HTMLDivElement>(null);
 
   // Helper for absolute API URLs
   const getAbsoluteUrl = (urlPath: string) => (urlPath.startsWith('http') ? urlPath : `${API_BASE_URL}${urlPath}`);
 
-  // Stem Play / Pause Toggle
-  const togglePlayStem = (instrument: string) => {
-    const targetAudio = audioRefs.current[instrument];
-    if (!targetAudio) return;
-
-    if (playingTrack === instrument && !targetAudio.paused) {
-      targetAudio.pause();
-      setPlayingTrack(null);
-    } else {
-      // Pause any other stem currently playing
-      Object.entries(audioRefs.current).forEach(([inst, audioEl]) => {
-        if (inst !== instrument && audioEl && !audioEl.paused) {
-          audioEl.pause();
-          audioEl.currentTime = 0;
-        }
+  // Helper to pause all currently playing audio
+  const pauseAllAudios = () => {
+    if (typeof document !== 'undefined') {
+      document.querySelectorAll('audio').forEach(a => {
+        if (!a.paused) a.pause();
       });
-      targetAudio.play().catch(console.error);
-      setPlayingTrack(instrument);
     }
   };
 
@@ -128,13 +112,7 @@ export default function Home() {
   // Load an entire song into the Studio
   const handleLoadSong = (songItem: HistoryItem, preferredInst?: string) => {
     // Stop any playing audio
-    Object.values(audioRefs.current).forEach(audioEl => {
-      if (audioEl && !audioEl.paused) {
-        audioEl.pause();
-        audioEl.currentTime = 0;
-      }
-    });
-    setPlayingTrack(null);
+    pauseAllAudios();
 
     setCurrentSong(songItem.filename);
     setAvailableStems(songItem.results || {});
@@ -529,7 +507,6 @@ export default function Home() {
                 const audioUrl = availableStemsAudio[instrument];
                 const hasScore = !!xmlUrl;
                 const isActive = activeStem === instrument;
-                const isPlaying = playingTrack === instrument;
                 const icon = INSTRUMENT_ICONS[instrument] || '🎵';
 
                 return (
@@ -585,46 +562,28 @@ export default function Home() {
 
                       {/* Stem Player Controls */}
                       {audioUrl && (
-                        <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-                          {/* Hidden actual audio element with clean ref */}
-                          <audio
-                            ref={(el) => { audioRefs.current[instrument] = el; }}
-                            src={getAbsoluteUrl(audioUrl)}
-                            onEnded={() => setPlayingTrack(null)}
-                            onPause={() => { if (playingTrack === instrument) setPlayingTrack(null); }}
-                            onPlay={() => { setPlayingTrack(instrument); }}
-                            preload="metadata"
-                          />
-
-                          {/* Custom Play/Pause Button */}
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => togglePlayStem(instrument)}
-                              className={`
-                                flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors active:scale-95
-                                ${isPlaying
-                                  ? 'bg-[#ded9cf] text-[#141312]'
-                                  : 'bg-[#22201d] text-[#cfc9be] hover:bg-[#2c2925] border border-[#33302b]'
-                                }
-                              `}
-                            >
-                              {isPlaying ? (
-                                <>
-                                  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-                                    <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                                  </svg>
-                                  <span>Pause Stem</span>
-                                </>
-                              ) : (
-                                <>
-                                  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-                                    <path d="M8 5v14l11-7z" />
-                                  </svg>
-                                  <span>Play Stem</span>
-                                </>
-                              )}
-                            </button>
+                        <div className="mt-3 pt-2.5 border-t border-[#262421]" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] text-[#787268] uppercase font-mono tracking-wider">
+                              Audio Track
+                            </span>
+                            <span className="text-[10px] text-[#8a8479]">
+                              Listen & Scrub
+                            </span>
                           </div>
+                          <audio
+                            controls
+                            src={getAbsoluteUrl(audioUrl)}
+                            preload="metadata"
+                            className="w-full h-8 rounded opacity-85 hover:opacity-100 transition-opacity"
+                            onPlay={(e) => {
+                              document.querySelectorAll('audio').forEach((el) => {
+                                if (el !== e.currentTarget && !el.paused) {
+                                  el.pause();
+                                }
+                              });
+                            }}
+                          />
                         </div>
                       )}
                     </div>
@@ -671,10 +630,30 @@ export default function Home() {
                       </div>
                     </div>
 
+                    {/* Active stem audio playback right next to score */}
+                    {availableStemsAudio[activeStem] && (
+                      <div className="flex items-center gap-2 w-full sm:w-auto min-w-[240px] max-w-sm">
+                        <span className="text-[11px] text-[#8a8377] shrink-0 font-medium hidden md:inline">Track:</span>
+                        <audio
+                          controls
+                          src={getAbsoluteUrl(availableStemsAudio[activeStem])}
+                          preload="metadata"
+                          className="w-full h-8 rounded opacity-90 hover:opacity-100 transition-opacity"
+                          onPlay={(e) => {
+                            document.querySelectorAll('audio').forEach((el) => {
+                              if (el !== e.currentTarget && !el.paused) {
+                                el.pause();
+                              }
+                            });
+                          }}
+                        />
+                      </div>
+                    )}
+
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => downloadFile(getAbsoluteUrl(availableStems[activeStem]), `${cleanSongTitle}_${activeStem}.musicxml`)}
-                        className="px-3 py-1.5 rounded-md bg-[#23211e] hover:bg-[#2e2b27] text-[#ded9ce] border border-[#38342f] text-xs font-medium transition-colors flex items-center gap-1.5 shadow-xs"
+                        className="px-3 py-1.5 rounded-md bg-[#23211e] hover:bg-[#2e2b27] text-[#ded9ce] border border-[#38342f] text-xs font-medium transition-colors flex items-center gap-1.5 shadow-xs shrink-0"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />

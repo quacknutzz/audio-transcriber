@@ -29,6 +29,7 @@ processed/
 uploads/
 *.wav
 *.mp3
+*.png
 debug_audio.wav
 debug_piano.mid
 

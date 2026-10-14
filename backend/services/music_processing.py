@@ -160,13 +160,22 @@ class MusicProcessingService:
             for n in new_part.recurse().notesAndRests:
                 n.voice = 1
 
-            # 6. Export to MusicXML
-            new_part.write('musicxml', fp=str(output_xml_path))
+            # 6. Wrap in Score with clean empty metadata
+            clean_score = music21.stream.Score()
+            clean_score.metadata = music21.metadata.Metadata()
+            clean_score.metadata.title = None
+            clean_score.metadata.movementName = None
+            clean_score.metadata.composer = None
+            clean_score.insert(0, new_part)
 
-            # 7. Post-process XML: strip "Music21 Fragment" and placeholder composer
+            # Export to MusicXML
+            clean_score.write('musicxml', fp=str(output_xml_path))
+
+            # 7. Post-process XML: strip any leftover "Music21 Fragment" and placeholder composer
             xml_content = output_xml_path.read_text(encoding='utf-8')
-            xml_content = re.sub(r'<movement-title>.*?</movement-title>', '', xml_content)
-            xml_content = re.sub(r'<creator.*?>.*?</creator>', '', xml_content)
+            xml_content = re.sub(r'\s*<movement-title>.*?</movement-title>', '', xml_content)
+            xml_content = re.sub(r'\s*<creator.*?>.*?</creator>', '', xml_content)
+            xml_content = xml_content.replace('Music21 Fragment', '').replace('Music21', '')
             output_xml_path.write_text(xml_content, encoding='utf-8')
 
             return output_xml_path
