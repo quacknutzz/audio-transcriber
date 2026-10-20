@@ -120,13 +120,14 @@ export default function Home() {
     setUploading(false);
     setShowUpload(false);
 
-    // Auto-select first track with score
+    // Auto-select first pitched track with score (never drums)
     const availableScores = songItem.results || {};
-    let targetInst = preferredInst;
+    const pitchedPriority = ['vocals', 'piano', 'guitar', 'bass', 'other'];
+    let targetInst = preferredInst && preferredInst !== 'drums' ? preferredInst : undefined;
     if (!targetInst || !availableScores[targetInst]) {
-      if (availableScores['vocals']) targetInst = 'vocals';
-      else if (availableScores['piano']) targetInst = 'piano';
-      else targetInst = Object.keys(availableScores)[0];
+      targetInst =
+        pitchedPriority.find((inst) => !!availableScores[inst]) ||
+        Object.keys(availableScores).find((inst) => inst !== 'drums');
     }
 
     if (targetInst && availableScores[targetInst]) {

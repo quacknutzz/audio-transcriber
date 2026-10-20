@@ -74,7 +74,7 @@ def load_existing_jobs():
         except Exception as e:
             logger.error(f"Failed to read state.json: {e}")
 
-def is_silent(audio_path: Path, peak_threshold: float = 0.035, rms_threshold: float = 0.002) -> bool:
+def is_silent(audio_path: Path, peak_threshold: float = 0.004, rms_threshold: float = 0.00008) -> bool:
     """Checks whether an isolated stem is silent or low-level Demucs bleed to avoid phantom notes."""
     try:
         import soundfile as sf
@@ -127,8 +127,8 @@ async def process_audio_task(file_path: Path, filename: str):
             else:
                 logger.info(f"Stem '{inst}' is silent, skipping transcription.")
 
-        # Stems to transcribe into sheet music
-        transcribe_order = ["piano", "vocals", "bass", "guitar", "other", "drums"]
+        # Stems to transcribe into sheet music (Drums is Audio-Only in stems_urls, never sheet music)
+        transcribe_order = ["piano", "vocals", "bass", "guitar", "other"]
         pending_instruments = [inst for inst in transcribe_order if inst in active_stems]
         
         results_urls = {}

