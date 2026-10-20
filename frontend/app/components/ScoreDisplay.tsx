@@ -27,7 +27,8 @@ export default function ScoreDisplay({ xmlData }: ScoreDisplayProps) {
                 osmdRef.current = new OpenSheetMusicDisplay(containerRef.current!, {
                     autoResize: true,
                     backend: 'svg',
-                    drawingParameters: 'compacttight',
+                    drawingParameters: 'default',
+                    autoBeam: true,
                     drawTitle: false,
                     drawSubtitle: false,
                     drawComposer: false,
@@ -38,7 +39,18 @@ export default function ScoreDisplay({ xmlData }: ScoreDisplayProps) {
                     drawTimeSignatures: true,
                 });
 
+                const rules = osmdRef.current.EngravingRules;
+                rules.RenderXMeasuresPerLineAkaSystem = 4;
+                rules.AutoGenerateMultipleRestMeasuresFromRestMeasures = true;
+                rules.RenderMultipleRestMeasures = true;
+                rules.MinimumDistanceBetweenSystems = 5.0;
+                rules.MinSkyBottomDistBetweenSystems = 4.5;
+                rules.MeasureNumberLabelOffset = 2.2;
+                rules.PercussionOneLineCutoff = 0;
+                rules.StretchLastSystemLine = false;
+
                 await osmdRef.current.load(xmlData);
+                osmdRef.current.zoom = 0.95;
                 osmdRef.current.render();
                 setLoading(false);
             } catch (e) {
@@ -81,7 +93,7 @@ export default function ScoreDisplay({ xmlData }: ScoreDisplayProps) {
                 style={{
                     display: loading || error ? 'none' : 'block',
                     background: '#ffffff',
-                    padding: '24px 16px',
+                    padding: '28px 24px',
                 }}
             />
         </div>

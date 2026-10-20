@@ -80,7 +80,16 @@ class TranscriptionService:
         transcriptor = PianoTranscription(device=device, checkpoint_path=str(checkpoint_path))
         transcriptor.transcribe(audio, str(output_midi_path))
         del transcriptor
-        
+
+        # Clean any low-energy bleed notes and verify note count; fallback to Basic Pitch if sparse
+        self._clean_and_filter_midi(output_midi_path, audio_path, "piano")
+        import pretty_midi
+        pm_check = pretty_midi.PrettyMIDI(str(output_midi_path))
+        note_count = sum(len(i.notes) for i in pm_check.instruments)
+        if note_count < 5:
+            self.logger.info(f"ByteDance Piano model found only {note_count} notes; falling back to Basic Pitch.")
+            return await self._transcribe_basic_pitch(audio_path, output_name, instrument_name="piano")
+
         return output_midi_path
 
     async def _transcribe_basic_pitch(self, audio_path: Path, output_name: str, instrument_name: str = "other") -> Path:
@@ -93,8 +102,8 @@ class TranscriptionService:
         onset_threshold = 0.5
         frame_threshold = 0.3
         minimum_note_length = 58.0
-        minimum_frequency = None
-        maximum_frequency = None
+        minimum_frequency = 80.0
+        maximum_frequency = 1046.5
         
         inst = instrument_name.lower()
         if inst == "bass":
@@ -112,6 +121,13 @@ class TranscriptionService:
             minimum_frequency = 130.0
             maximum_frequency = 1100.0
             minimum_note_length = 70.0
+        elif inst == "guitar":
+            # Constrain to standard guitar fundamental & chord register (E2: ~82Hz to A5: ~880Hz)
+            onset_threshold = 0.52
+            frame_threshold = 0.33
+            minimum_frequency = 80.0
+            maximum_frequency = 880.0
+            minimum_note_length = 65.0
         
         expected_output = self.output_dir / f"{audio_path.stem}_basic_pitch.mid"
         if expected_output.exists():
@@ -271,7 +287,8 @@ class TranscriptionService:
                 continue
             
             segment = y[start_samp:end_samp]
-            centroid = librosa.feature.spectral_centroid(y=segment, sr=sr)[0].mean()
+            n_fft = min(512, len(segment))
+            centroid = librosa.feature.spectral_centroid(y=segment, sr=sr, n_fft=n_fft)[0].mean()
             
             if centroid < 300:
                 pitch = 36  # Kick

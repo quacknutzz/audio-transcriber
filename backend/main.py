@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 import torch
+import music21
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,14 +74,15 @@ def load_existing_jobs():
         except Exception as e:
             logger.error(f"Failed to read state.json: {e}")
 
-def is_silent(audio_path: Path, threshold: float = 0.005) -> bool:
-    """Checks whether an isolated stem is silent to avoid wasting compute."""
+def is_silent(audio_path: Path, peak_threshold: float = 0.035, rms_threshold: float = 0.002) -> bool:
+    """Checks whether an isolated stem is silent or low-level Demucs bleed to avoid phantom notes."""
     try:
         import soundfile as sf
         import numpy as np
         data, _ = sf.read(str(audio_path))
         peak = float(np.max(np.abs(data)))
-        return peak < threshold
+        rms = float(np.sqrt(np.mean(data**2)))
+        return peak < peak_threshold or rms < rms_threshold
     except Exception:
         return False
 
@@ -126,7 +128,7 @@ async def process_audio_task(file_path: Path, filename: str):
                 logger.info(f"Stem '{inst}' is silent, skipping transcription.")
 
         # Stems to transcribe into sheet music
-        transcribe_order = ["piano", "vocals", "bass", "guitar", "other"]
+        transcribe_order = ["piano", "vocals", "bass", "guitar", "other", "drums"]
         pending_instruments = [inst for inst in transcribe_order if inst in active_stems]
         
         results_urls = {}
@@ -142,10 +144,10 @@ async def process_audio_task(file_path: Path, filename: str):
 
         total_inst = len(pending_instruments)
         
-        # 3. Sequential transcription (Strictly one instrument at a time to stay under 3GB VRAM)
-        master_key_sig = None
+        # 3A. Sequential neural transcription (Strictly one instrument at a time to stay under 3GB VRAM)
+        midi_map = {}
         for idx, inst in enumerate(pending_instruments):
-            progress_val = int(25 + ((idx / max(total_inst, 1)) * 65))
+            progress_val = int(25 + ((idx / max(total_inst, 1)) * 50))
             job_status[filename] = {
                 "status": "processing",
                 "progress": progress_val,
@@ -156,42 +158,42 @@ async def process_audio_task(file_path: Path, filename: str):
             stem_audio_path = active_stems[inst]
             output_name = f"{project_name}_{inst}"
             
-            # Specialized transcription
             midi_path = await transcription_service.transcribe_instrument(
                 stem_audio_path, output_name, instrument_name=inst
             )
             free_gpu_memory()
-            
-            # MusicXML conversion
             if midi_path and midi_path.exists():
-                try:
-                    drum_path = stems.get("drums")
-                    xml_path = music_processing_service.midi_to_xml(
-                        midi_path, output_name, audio_ref_path=file_path, drum_ref_path=drum_path,
-                        master_key_sig=master_key_sig
-                    )
-                    results_urls[inst] = f"/xml/{xml_path.name}"
-                    logger.info(f"Successfully generated sheet music for {inst}: {xml_path.name}")
-                    
-                    if master_key_sig is None:
-                        try:
-                            score = music21.converter.parse(str(xml_path))
-                            ks = score.recurse().getElementsByClass(music21.key.KeySignature)
-                            if ks:
-                                master_key_sig = ks.first()
-                                logger.info(f"Harmonized master key signature for song: {master_key_sig}")
-                        except Exception as k_err:
-                            logger.warning(f"Could not extract master key: {k_err}")
-                except Exception as xml_err:
-                    logger.error(f"MusicXML generation failed for {inst}: {xml_err}")
+                midi_map[inst] = (midi_path, output_name)
 
-        # Drums: Include audio stem for playback. (If drum notation was desired, unpitched transcription can be enabled)
-        if "drums" in stems and "drums" not in stems_urls:
+        # 3B. Ensemble-locked MusicXML Engraving (runs after all MIDIs exist so click-track optimizer sees full ensemble)
+        master_key_sig = None
+        drum_path = stems.get("drums")
+        for idx, (inst, (midi_path, output_name)) in enumerate(midi_map.items()):
+            progress_val = int(78 + ((idx / max(len(midi_map), 1)) * 18))
+            job_status[filename] = {
+                "status": "processing",
+                "progress": progress_val,
+                "message": f"Engraving sheet music for {inst.capitalize()}..."
+            }
             try:
-                rel = Path(stems["drums"]).relative_to(OUTPUT_DIR / "stems")
-                stems_urls["drums"] = f"/stems/{rel.as_posix()}"
-            except Exception:
-                pass
+                xml_path = music_processing_service.midi_to_xml(
+                    midi_path, output_name, audio_ref_path=file_path, drum_ref_path=drum_path,
+                    master_key_sig=master_key_sig if inst != "drums" else None
+                )
+                results_urls[inst] = f"/xml/{xml_path.name}"
+                logger.info(f"Successfully generated sheet music for {inst}: {xml_path.name}")
+                
+                if master_key_sig is None and inst != "drums":
+                    try:
+                        score = music21.converter.parse(str(xml_path))
+                        ks = score.recurse().getElementsByClass(music21.key.KeySignature)
+                        if ks:
+                            master_key_sig = ks.first()
+                            logger.info(f"Harmonized master key signature for song: {master_key_sig}")
+                    except Exception as k_err:
+                        logger.warning(f"Could not extract master key: {k_err}")
+            except Exception as xml_err:
+                logger.error(f"MusicXML generation failed for {inst}: {xml_err}")
 
         elapsed = time.time() - start_time
         m, s = divmod(int(elapsed), 60)
