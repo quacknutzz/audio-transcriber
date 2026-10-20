@@ -78,10 +78,12 @@ class MusicProcessingService:
                     midi_paths = list(midi_dir.glob(f"{project_stem}_*.mid"))
 
             t0 = 0.0
+            time_sig_str = "4/4"
             if midi_paths:
-                opt_bpm, opt_t0 = self._optimize_click_track(midi_paths, tempo)
+                opt_bpm, opt_t0, opt_ts = self._optimize_click_track(midi_paths, tempo)
                 tempo = opt_bpm
                 t0 = opt_t0
+                time_sig_str = opt_ts
 
                 # Refine Key Signature using symbolic MIDI pitch-class duration fit to minimize accidentals
                 from collections import Counter
@@ -118,18 +120,18 @@ class MusicProcessingService:
                             best_k_sc = k_score
                             key_note = k_cand
 
-            self.logger.info(f"Detected Click Track: Tempo={tempo:.1f} BPM, Downbeat t0={t0:.3f}s, Key={key_note}")
-            self._song_cache[cache_key] = (tempo, key_note, t0)
-            return tempo, key_note, t0
+            self.logger.info(f"Detected Click Track: Tempo={tempo:.1f} BPM, Meter={time_sig_str}, Downbeat t0={t0:.3f}s, Key={key_note}")
+            self._song_cache[cache_key] = (tempo, key_note, t0, time_sig_str)
+            return tempo, key_note, t0, time_sig_str
 
         except Exception as e:
             self.logger.warning(f"Attribute detection fallback: {e}")
-            return 120.0, "C", 0.0
+            return 120.0, "C", 0.0, "4/4"
 
     def _optimize_click_track(self, midi_paths: list, init_bpm: float):
         """
-        Finds the exact studio click-track (BPM, downbeat t0) that maximizes
-        phase-locking of note onsets to the 4/4 metric grid.
+        Finds the exact studio click-track (BPM, downbeat t0, and Time Signature 4/4, 3/4, or 6/8)
+        that maximizes phase-locking of note onsets and harmonic root changes to the metric grid.
         """
         onsets = []
         weights = []
@@ -157,7 +159,7 @@ class MusicProcessingService:
                 continue
 
         if len(onsets) < 8:
-            return round(init_bpm), 0.0
+            return round(init_bpm), 0.0, "4/4"
 
         onsets = np.array(onsets)
         weights = np.array(weights)
@@ -165,7 +167,6 @@ class MusicProcessingService:
         bar_weights = np.array(bar_weights)
         bar_weights /= np.sum(bar_weights)
 
-        first_onset = float(np.percentile(onsets, 1)) if len(onsets) > 30 else float(np.min(onsets))
         earliest = float(np.min(onsets))
 
         best_score = -1e9
@@ -199,27 +200,54 @@ class MusicProcessingService:
                     beat_phase += beat_sec
                 best_t0 = beat_phase
 
-        # Determine which of the 4 beat phases aligns best with 4/4 measure downbeats
+        # Evaluate 4-beat (4/4) vs 3-beat (3/4 or 6/8) measure periodicity
         beat_sec = 60.0 / best_bpm
-        best_bar_t0 = best_t0
-        best_bar_score = -1e9
+        best_bar4_t0 = best_t0
+        best_bar4_score = -1e9
         for m_shift in range(4):
             cand_t0 = best_t0 - m_shift * beat_sec
             while cand_t0 < -3.5 * beat_sec:
                 cand_t0 += 4.0 * beat_sec
             bar_phases = 2.0 * np.pi * (onsets - cand_t0) / (4.0 * beat_sec)
             bar_alignment = float(np.sum(bar_weights * np.cos(bar_phases)))
-            if bar_alignment > best_bar_score:
-                best_bar_score = bar_alignment
-                best_bar_t0 = cand_t0
+            if bar_alignment > best_bar4_score:
+                best_bar4_score = bar_alignment
+                best_bar4_t0 = cand_t0
+
+        best_bar3_t0 = best_t0
+        best_bar3_score = -1e9
+        for m_shift in range(3):
+            cand_t0 = best_t0 - m_shift * beat_sec
+            while cand_t0 < -2.5 * beat_sec:
+                cand_t0 += 3.0 * beat_sec
+            bar_phases = 2.0 * np.pi * (onsets - cand_t0) / (3.0 * beat_sec)
+            bar_alignment = float(np.sum(bar_weights * np.cos(bar_phases)))
+            if bar_alignment > best_bar3_score:
+                best_bar3_score = bar_alignment
+                best_bar3_t0 = cand_t0
+
+        # If 3-beat barline alignment significantly exceeds 4-beat alignment, classify as 3/4 or 6/8
+        if best_bar3_score > best_bar4_score + 0.08 and best_bar3_score > 0.15:
+            best_bar_t0 = best_bar3_t0
+            bar_beats = 3.0
+            # Distinguish 6/8 (compound duple: strong accent at 0.0 and 1.5 quarter-beats) vs 3/4 (simple triple: 0.0, 1.0, 2.0)
+            comp_phases = 2.0 * np.pi * (onsets - best_bar3_t0) / (1.5 * beat_sec)
+            comp_score = float(np.sum(weights * np.cos(comp_phases)))
+            simple_phases = 2.0 * np.pi * (onsets - best_bar3_t0) / beat_sec
+            simple_score = float(np.sum(weights * np.cos(simple_phases)))
+            time_sig_str = "6/8" if comp_score > simple_score + 0.04 else "3/4"
+        else:
+            best_bar_t0 = best_bar4_t0
+            bar_beats = 4.0
+            time_sig_str = "4/4"
 
         # Keep t0 non-negative or within 1 measure before the first onset
         while best_bar_t0 > earliest + 0.25 * beat_sec:
-            best_bar_t0 -= 4.0 * beat_sec
-        while best_bar_t0 < -3.75 * beat_sec:
-            best_bar_t0 += 4.0 * beat_sec
+            best_bar_t0 -= bar_beats * beat_sec
+        while best_bar_t0 < -(bar_beats - 0.25) * beat_sec:
+            best_bar_t0 += bar_beats * beat_sec
 
-        return best_bpm, best_bar_t0
+        return best_bpm, best_bar_t0, time_sig_str
 
     @staticmethod
     def _fold_pitch_to_window(pitch: int, low: int, high: int) -> int:
@@ -309,27 +337,53 @@ class MusicProcessingService:
         return voiced
 
     @staticmethod
-    def _decompose_rest_interval(start_q: float, end_q: float) -> list:
+    def _decompose_rest_interval(start_q: float, end_q: float, time_sig_str: str = "4/4") -> list:
         """
-        Decomposes a silent interval [start_q, end_q] within a 4.0-beat measure
-        strictly along the 4/4 metric hierarchy:
-        - Full measure [0.0, 4.0] -> [4.0] (Whole rest)
-        - Half measure [0.0, 2.0] or [2.0, 4.0] -> [2.0] (Half rest)
-        - Full beat [k, k+1] -> [1.0] (Quarter rest)
-        - Half beat [k, k+0.5] or [k+0.5, k+1] -> [0.5] (Eighth rest)
-        Guarantees ZERO dotted rests and ZERO rests crossing the half-bar!
+        Decomposes a silent interval [start_q, end_q] within a measure
+        strictly along the active meter's hierarchy (4/4, 3/4, or 6/8):
+        - 4/4: splits across half-bar (2.0), then beat boundaries (1.0, 3.0). Rests in {4.0, 2.0, 1.0, 0.5}.
+        - 3/4: full measure [0.0, 3.0] -> 3.0; otherwise splits at beat boundaries (1.0, 2.0) into {1.0, 0.5} (never 2.0 half-rests in 3/4).
+        - 6/8: full measure [0.0, 3.0] -> 3.0; compound half-bar [0.0, 1.5] or [1.5, 3.0] -> 1.5 (dotted-quarter rest); otherwise splits at 1.5 and beat subdivisions.
         """
         a = round(start_q * 2.0) / 2.0
         b = round(end_q * 2.0) / 2.0
         if b <= a:
             return []
+
+        if time_sig_str == "6/8":
+            if a == 0.0 and b == 3.0:
+                return [(0.0, 3.0)]
+            if a < 1.5 and b > 1.5:
+                return (
+                    MusicProcessingService._decompose_rest_interval(a, 1.5, "6/8") +
+                    MusicProcessingService._decompose_rest_interval(1.5, b, "6/8")
+                )
+            if (a == 0.0 and b == 1.5) or (a == 1.5 and b == 3.0):
+                return [(a, 1.5)]
+            # Inside a 1.5-beat compound half ([0.0, 1.5] or [1.5, 3.0]), split into 0.5 eighth rests if 1.0
+            if round(b - a, 2) == 1.0:
+                return [(a, 0.5), (round(a + 0.5, 2), 0.5)]
+            return [(a, round(b - a, 2))]
+
+        if time_sig_str == "3/4":
+            if a == 0.0 and b == 3.0:
+                return [(0.0, 3.0)]
+            for boundary in (1.0, 2.0):
+                if a < boundary and b > boundary:
+                    return (
+                        MusicProcessingService._decompose_rest_interval(a, boundary, "3/4") +
+                        MusicProcessingService._decompose_rest_interval(boundary, b, "3/4")
+                    )
+            return [(a, round(b - a, 2))]
+
+        # Default 4/4 metric hierarchy
         if a == 0.0 and b == 4.0:
             return [(0.0, 4.0)]
         # Split across the half-bar (2.0)
         if a < 2.0 and b > 2.0:
             return (
-                MusicProcessingService._decompose_rest_interval(a, 2.0) +
-                MusicProcessingService._decompose_rest_interval(2.0, b)
+                MusicProcessingService._decompose_rest_interval(a, 2.0, "4/4") +
+                MusicProcessingService._decompose_rest_interval(2.0, b, "4/4")
             )
         # Inside Half 1 [0.0, 2.0] or Half 2 [2.0, 4.0]
         if (a == 0.0 and b == 2.0) or (a == 2.0 and b == 4.0):
@@ -337,17 +391,17 @@ class MusicProcessingService:
         mid_beat = 1.0 if b <= 2.0 else 3.0
         if a < mid_beat and b > mid_beat:
             return (
-                MusicProcessingService._decompose_rest_interval(a, mid_beat) +
-                MusicProcessingService._decompose_rest_interval(mid_beat, b)
+                MusicProcessingService._decompose_rest_interval(a, mid_beat, "4/4") +
+                MusicProcessingService._decompose_rest_interval(mid_beat, b, "4/4")
             )
         return [(a, round(b - a, 2))]
 
     @staticmethod
-    def _decompose_note_interval(start_q: float, end_q: float, tie_in: bool = False, tie_out: bool = False) -> list:
+    def _decompose_note_interval(start_q: float, end_q: float, tie_in: bool = False, tie_out: bool = False, time_sig_str: str = "4/4") -> list:
         """
-        Decomposes a note/chord interval [start_q, end_q] inside a 4.0-beat measure into
-        canonical engraving durations {4.0, 3.0, 2.0, 1.5, 1.0, 0.5}:
-        - Eliminates double-dotted notes (3.5, 1.75) and awkward half-bar syncopations.
+        Decomposes a note/chord interval [start_q, end_q] inside a measure into
+        canonical engraving durations for the active meter (4/4, 3/4, or 6/8):
+        - Eliminates double-dotted notes (3.5, 1.75) and awkward cross-beat syncopations.
         - Returns list of (offset, dur, tie_type) tuples.
         """
         a = round(start_q * 2.0) / 2.0
@@ -356,6 +410,40 @@ class MusicProcessingService:
         if dur <= 0:
             return []
 
+        if time_sig_str == "6/8":
+            # Compound duple (two 1.5-quarter beats: [0.0, 1.5] and [1.5, 3.0])
+            if a == 0.0 and b == 3.0:
+                return MusicProcessingService._attach_ties([(0.0, 3.0)], tie_in, tie_out)
+            if a < 1.5 and b > 1.5:
+                left = MusicProcessingService._decompose_note_interval(a, 1.5, False, False, "6/8")
+                right = MusicProcessingService._decompose_note_interval(1.5, b, False, False, "6/8")
+                raw_segs = [(x[0], x[1]) for x in (left + right)]
+                return MusicProcessingService._attach_ties(raw_segs, tie_in, tie_out)
+            return MusicProcessingService._attach_ties([(a, dur)], tie_in, tie_out)
+
+        if time_sig_str == "3/4":
+            # Simple triple (3.0 quarter-beats: [0.0, 1.0, 2.0, 3.0])
+            if a == 0.0 and dur == 2.5:
+                segs = [(0.0, 2.0), (2.0, 0.5)] if tie_out else [(0.0, 2.0)]
+                return MusicProcessingService._attach_ties(segs, tie_in, tie_out)
+            if a == 0.5 and dur == 2.5:
+                segs = [(0.5, 0.5), (1.0, 2.0)]
+                return MusicProcessingService._attach_ties(segs, tie_in, tie_out)
+            canonical_34 = {
+                (0.0, 3.0), (0.0, 2.0), (1.0, 3.0),
+                (0.0, 1.5), (0.5, 2.0), (1.0, 2.5), (1.5, 3.0),
+                (0.0, 1.0), (0.5, 1.5), (1.0, 2.0), (1.5, 2.5), (2.0, 3.0),
+                (0.0, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 2.5), (2.5, 3.0),
+            }
+            if (a, b) in canonical_34:
+                return MusicProcessingService._attach_ties([(a, dur)], tie_in, tie_out)
+            for boundary in (1.0, 2.0):
+                if a < boundary and b > boundary:
+                    raw_segs = [(a, round(boundary - a, 2)), (boundary, round(b - boundary, 2))]
+                    return MusicProcessingService._attach_ties(raw_segs, tie_in, tie_out)
+            return MusicProcessingService._attach_ties([(a, dur)], tie_in, tie_out)
+
+        # Default 4/4 decomposition
         # Snap 3.5-beat duration starting at 0.0 to clean 3.0 dotted-half (or 4.0 whole if tied out)
         if a == 0.0 and dur == 3.5:
             if tie_out:
@@ -394,8 +482,8 @@ class MusicProcessingService:
 
         # Otherwise split cleanly at the half-bar (2.0)
         if a < 2.0 and b > 2.0:
-            left = MusicProcessingService._decompose_note_interval(a, 2.0, tie_in=False, tie_out=False)
-            right = MusicProcessingService._decompose_note_interval(2.0, b, tie_in=False, tie_out=False)
+            left = MusicProcessingService._decompose_note_interval(a, 2.0, tie_in=False, tie_out=False, time_sig_str="4/4")
+            right = MusicProcessingService._decompose_note_interval(2.0, b, tie_in=False, tie_out=False, time_sig_str="4/4")
             raw_segs = [(x[0], x[1]) for x in (left + right)]
             return MusicProcessingService._attach_ties(raw_segs, tie_in, tie_out)
 
@@ -437,13 +525,16 @@ class MusicProcessingService:
         self.logger.info(f"Converting MIDI to XML: {midi_path} -> {output_xml_path}")
 
         try:
-            # 1. Detect Beat-Locked Click Track (BPM, Key, Downbeat t0)
+            # 1. Detect Beat-Locked Click Track (BPM, Key, Downbeat t0, Meter 4/4 | 3/4 | 6/8)
             tempo_bpm = 120.0
             key_tonic = "C"
             t0 = 0.0
+            time_sig_str = "4/4"
             if audio_ref_path and audio_ref_path.exists():
                 res = self.detect_attributes(audio_ref_path, drum_ref_path)
-                if len(res) == 3:
+                if len(res) == 4:
+                    tempo_bpm, key_tonic, t0, time_sig_str = res
+                elif len(res) == 3:
                     tempo_bpm, key_tonic, t0 = res
                 else:
                     tempo_bpm, key_tonic = res
@@ -677,35 +768,36 @@ class MusicProcessingService:
                         idx += 1
                 quantized = consolidated_q
 
-            max_q = max((ev["start"] + ev["dur"] for ev in quantized), default=4.0)
-            total_measures = max(1, int(np.ceil(max_q / 4.0)))
+            bar_q = 3.0 if time_sig_str in ("3/4", "6/8") else 4.0
+            max_q = max((ev["start"] + ev["dur"] for ev in quantized), default=bar_q)
+            total_measures = max(1, int(np.ceil(max_q / bar_q)))
 
-            # 6. Distribute notes into mathematically exact 4.0-beat measures with Canonical Decomposition
+            # 6. Distribute notes into mathematically exact measures (4/4, 3/4, or 6/8) with Canonical Decomposition
             measure_events = {m: [] for m in range(1, total_measures + 1)}
 
             for ev in quantized:
                 q_s = ev["start"]
                 q_d = ev["dur"]
                 p = ev["pitches"]
-                m_idx = int(q_s // 4.0) + 1
-                offset_in_m = round((q_s % 4.0) * 2.0) / 2.0
-                spill = round(((offset_in_m + q_d) - 4.0) * 2.0) / 2.0
+                m_idx = int(q_s // bar_q) + 1
+                offset_in_m = round((q_s % bar_q) * 2.0) / 2.0
+                spill = round(((offset_in_m + q_d) - bar_q) * 2.0) / 2.0
 
                 # Suppress short reverb/bleed spillover (<= 0.5 beat) across barlines
                 if spill <= 0.5:
-                    dur_in_m = min(q_d, round(4.0 - offset_in_m, 2))
-                    segs = self._decompose_note_interval(offset_in_m, offset_in_m + dur_in_m, tie_in=False, tie_out=False)
+                    dur_in_m = min(q_d, round(bar_q - offset_in_m, 2))
+                    segs = self._decompose_note_interval(offset_in_m, offset_in_m + dur_in_m, tie_in=False, tie_out=False, time_sig_str=time_sig_str)
                     for off, d, t_val in segs:
                         measure_events[m_idx].append({"offset": off, "dur": d, "pitches": p, "tie": t_val})
                 else:
                     # Genuinely held note crossing barline
-                    segs_m1 = self._decompose_note_interval(offset_in_m, 4.0, tie_in=False, tie_out=True)
+                    segs_m1 = self._decompose_note_interval(offset_in_m, bar_q, tie_in=False, tie_out=True, time_sig_str=time_sig_str)
                     for off, d, t_val in segs_m1:
                         measure_events[m_idx].append({"offset": off, "dur": d, "pitches": p, "tie": t_val})
 
-                    dur_m2 = min(4.0, round(spill * 2.0) / 2.0)
+                    dur_m2 = min(bar_q, round(spill * 2.0) / 2.0)
                     if m_idx + 1 <= total_measures and dur_m2 >= 0.5:
-                        segs_m2 = self._decompose_note_interval(0.0, dur_m2, tie_in=True, tie_out=False)
+                        segs_m2 = self._decompose_note_interval(0.0, dur_m2, tie_in=True, tie_out=False, time_sig_str=time_sig_str)
                         for off, d, t_val in segs_m2:
                             measure_events[m_idx + 1].append({"offset": off, "dur": d, "pitches": p, "tie": t_val})
 
@@ -721,7 +813,7 @@ class MusicProcessingService:
             else:
                 part_clef = music21.clef.TrebleClef()
 
-            time_sig = music21.meter.TimeSignature('4/4')
+            time_sig = music21.meter.TimeSignature(time_sig_str)
             tempo_mark = music21.tempo.MetronomeMark(number=round(tempo_bpm))
             key_sharps = int(getattr(detected_key, 'sharps', 0) or 0)
 
@@ -751,12 +843,12 @@ class MusicProcessingService:
                             evs.append(e)
 
                 if not evs:
-                    m.insert(0.0, music21.note.Rest(quarterLength=4.0))
+                    m.insert(0.0, music21.note.Rest(quarterLength=bar_q))
                 else:
                     curr_pos = 0.0
                     for ev in evs:
                         if ev["offset"] > curr_pos:
-                            for r_off, r_dur in self._decompose_rest_interval(curr_pos, ev["offset"]):
+                            for r_off, r_dur in self._decompose_rest_interval(curr_pos, ev["offset"], time_sig_str=time_sig_str):
                                 m.insert(r_off, music21.note.Rest(quarterLength=r_dur))
 
                         unique_p = sorted(list(set(ev["pitches"])))
@@ -774,8 +866,8 @@ class MusicProcessingService:
                         m.insert(ev["offset"], el)
                         curr_pos = round(ev["offset"] + ev["dur"], 2)
 
-                    if curr_pos < 4.0:
-                        for r_off, r_dur in self._decompose_rest_interval(curr_pos, 4.0):
+                    if curr_pos < bar_q:
+                        for r_off, r_dur in self._decompose_rest_interval(curr_pos, bar_q, time_sig_str=time_sig_str):
                             m.insert(r_off, music21.note.Rest(quarterLength=r_dur))
 
                 new_part.append(m)
